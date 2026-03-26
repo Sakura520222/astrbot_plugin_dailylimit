@@ -6,14 +6,9 @@ import sys
 import time
 
 import aiohttp
-import redis
-import redis.exceptions
 
 import astrbot.api.star as star  # type: ignore
-from astrbot.api import (
-    AstrBotConfig,  # type: ignore
-    logger,  # type: ignore
-)
+from astrbot.api import AstrBotConfig  # type: ignore
 from astrbot.api.event import (  # type: ignore
     AstrMessageEvent,
     MessageChain,
@@ -236,213 +231,46 @@ class DailyLimitPlugin(star.Star):
             parser_func(line)
 
     def _log(self, level: str, message: str, *args) -> None:
-        """
-        统一的日志记录方法
-
-        Args:
-            level: 日志级别 ('info', 'warning', 'error')
-            message: 日志消息模板
-            *args: 格式化参数
-        """
-        if self.logger:
-            self.logger.log(level, message, *args)
-        else:
-            # 使用内置实现（兼容旧代码）
-            log_func = getattr(logger, level, logger.info)
-            if args:
-                log_func(message.format(*args))
-            else:
-                log_func(message)
+        """统一的日志记录方法"""
+        self.logger.log(level, message, *args)
 
     def _log_warning(self, message, *args):
         """警告日志记录"""
-        if self.logger:
-            self.logger.log_warning(message, *args)
-        else:
-            self._log("warning", message, *args)
+        self.logger.log_warning(message, *args)
 
     def _log_error(self, message, *args):
         """错误日志记录"""
-        if self.logger:
-            self.logger.log_error(message, *args)
-        else:
-            self._log("error", message, *args)
+        self.logger.log_error(message, *args)
 
     def _log_info(self, message, *args):
         """信息日志记录"""
-        if self.logger:
-            self.logger.log_info(message, *args)
-        else:
-            self._log("info", message, *args)
+        self.logger.log_info(message, *args)
 
     def _handle_error(
         self, error: Exception, context: str = "", user_message: str = None
     ) -> None:
-        """
-        统一的错误处理方法
-
-        提供统一的错误处理机制，包括：
-        - 错误日志记录
-        - 错误上下文追踪
-        - 详细错误信息记录（包含堆栈跟踪）
-
-        参数：
-            error: 异常对象
-            context: 错误上下文描述
-            user_message: 返回给用户的友好错误消息（可选）
-        """
-        if self.logger:
-            self.logger.handle_error(error, context, user_message)
-        else:
-            # 使用内置实现（兼容旧代码）
-            error_context = f"{context}: " if context else ""
-            self._log_error("{}发生错误: {}", error_context, str(error))
-
-            # 记录详细的错误信息用于调试
-            if hasattr(error, "__traceback__"):
-                import traceback
-
-                error_details = traceback.format_exc()
-                self._log_error("{}详细错误信息:\n{}", error_context, error_details)
+        """统一的错误处理方法"""
+        self.logger.handle_error(error, context, user_message)
 
     def _safe_execute(
         self, func, *args, context: str = "", default_return=None, **kwargs
     ):
-        """
-        安全执行函数，捕获异常并记录
-
-        Args:
-            func: 要执行的函数
-            *args: 函数参数
-            context: 执行上下文描述
-            default_return: 异常时的默认返回值
-            **kwargs: 函数关键字参数
-
-        Returns:
-            函数执行结果或默认返回值
-        """
-        if self.logger:
-            return self.logger.safe_execute(func, *args, context=context, default_return=default_return, **kwargs)
-        else:
-            # 使用内置实现（兼容旧代码）
-            try:
-                return func(*args, **kwargs)
-            except Exception as e:
-                self._handle_error(e, context)
-                return default_return
+        """安全执行函数，捕获异常并记录"""
+        return self.logger.safe_execute(func, *args, context=context, default_return=default_return, **kwargs)
 
     def _validate_redis_connection(self) -> bool:
-        """
-        验证Redis连接状态
-
-        检查Redis连接是否可用，包括连接状态和响应能力。
-
-        返回：
-            bool: Redis连接是否可用
-        """
-        if self.redis_client:
-            return self.redis_client.validate_redis_connection()
-
-        # 使用内置实现（兼容旧代码）
-        if not self.redis:
-            self._log_error("Redis连接未初始化")
-            return False
-
-        try:
-            # 发送ping命令验证连接
-            response = self.redis.ping()
-            if not response:
-                self._log_warning("Redis ping响应异常: {}", response)
-                return False
-
-            return True
-
-        except redis.exceptions.ConnectionError as e:
-            self._log_error("Redis连接错误: {}", str(e))
-            return False
-        except redis.exceptions.TimeoutError as e:
-            self._log_error("Redis连接超时: {}", str(e))
-            return False
-        except Exception as e:
-            self._handle_error(e, "Redis连接验证")
-            return False
+        """验证Redis连接状态"""
+        return self.redis_client.validate_redis_connection()
 
     def get_redis_status(self):
-        """
-        获取Redis连接状态信息
-
-        返回：
-            dict: Redis连接状态信息字典
-        """
-        if self.redis_client:
-            return self.redis_client.get_redis_status()
-
-        # 使用内置实现（兼容旧代码）
-        if not self.redis:
-            return {
-                "connected": False,
-                "status": "未初始化",
-                "error": "Redis连接未初始化",
-            }
-
-        try:
-            # 检查连接状态
-            self.redis.ping()
-
-            # 获取Redis服务器信息
-            info = self.redis.info()
-
-            return {
-                "connected": True,
-                "status": "正常",
-                "response_time": "正常",
-                "server_version": info.get("redis_version", "未知"),
-                "used_memory": info.get("used_memory_human", "未知"),
-                "connected_clients": info.get("connected_clients", 0),
-            }
-
-        except Exception as e:
-            return {"connected": False, "status": "异常", "error": str(e)}
+        """获取Redis连接状态信息"""
+        return self.redis_client.get_redis_status()
 
     def _reconnect_redis(self):
-        """
-        重新连接Redis
-
-        当Redis连接断开时，尝试重新建立连接。
-
-        返回：
-            bool: 重连成功返回True，失败返回False
-        """
-        if self.redis_client:
-            result = self.redis_client.reconnect_redis()
-            # 更新 redis 属性
-            self.redis = self.redis_client.redis
-            return result
-
-        # 使用内置实现（兼容旧代码）
-        if not self.redis:
-            self._log_error("Redis连接未初始化，无法重连")
-            return False
-
-        try:
-            # 关闭现有连接
-            if hasattr(self.redis, "connection_pool") and self.redis.connection_pool:
-                self.redis.connection_pool.disconnect()
-
-            # 重新连接
-            self.redis.connection_pool.reset()
-
-            # 验证新连接
-            if self._validate_redis_connection():
-                self._log_info("Redis重连成功")
-                return True
-            else:
-                self._log_error("Redis重连失败")
-                return False
-
-        except Exception as e:
-            self._log_error("Redis重连过程中出错: {}", str(e))
-            return False
+        """重新连接Redis"""
+        result = self.redis_client.reconnect_redis()
+        self.redis = self.redis_client.redis
+        return result
 
     def _validate_config_structure(self) -> bool:
         """
@@ -1217,30 +1045,8 @@ class DailyLimitPlugin(star.Star):
 
     def _init_redis(self):
         """初始化Redis连接"""
-        if self.redis_client:
-            self.redis_client.init_redis()
-            # 设置 redis 属性以保持向后兼容
-            self.redis = self.redis_client.redis
-        else:
-            # 使用内置实现（兼容旧代码）
-            try:
-                # 获取连接池大小配置
-                pool_size = self.config["limits"].get("redis_connection_pool_size", 10)
-
-                self.redis = redis.Redis(
-                    host=self.config["redis"]["host"],
-                    port=self.config["redis"]["port"],
-                    db=self.config["redis"]["db"],
-                    password=self.config["redis"]["password"],
-                    decode_responses=True,  # 自动将响应解码为字符串
-                    max_connections=pool_size,  # 使用配置的连接池大小
-                )
-                # 测试连接
-                self.redis.ping()
-                self._log_info("Redis连接成功，连接池大小: {}", pool_size)
-            except Exception as e:
-                self._log_error("Redis连接失败: {}", str(e))
-                self.redis = None
+        self.redis_client.init_redis()
+        self.redis = self.redis_client.redis
 
     def _init_web_server(self):
         """
@@ -1617,83 +1423,23 @@ class DailyLimitPlugin(star.Star):
 
     def _should_skip_message(self, message_str):
         """检查消息是否应该忽略处理"""
-        if self.limiter:
-            return self.limiter.should_skip_message(message_str)
-
-        # 使用内置实现（兼容旧代码）
-        if not message_str or not self.skip_patterns:
-            return False
-
-        # 检查消息是否以任何忽略模式开头
-        for pattern in self.skip_patterns:
-            if message_str.startswith(pattern):
-                return True
-
-        return False
+        return self.limiter.should_skip_message(message_str)
 
     def _get_group_mode(self, group_id):
         """获取群组的模式配置"""
-        if self.limiter:
-            return self.limiter.get_group_mode(group_id)
-
-        # 使用内置实现（兼容旧代码）
-        if not group_id:
-            return "individual"  # 私聊默认为独立模式
-
-        # 检查是否有特定群组模式配置
-        if str(group_id) in self.group_modes:
-            return self.group_modes[str(group_id)]
-
-        # 默认使用共享模式（保持向后兼容性）
-        return "shared"
+        return self.limiter.get_group_mode(group_id)
 
     def _parse_time_string(self, time_str):
         """解析时间字符串为时间对象"""
-        if self.limiter:
-            return self.limiter.parse_time_string(time_str)
-
-        # 使用内置实现（兼容旧代码）
-        try:
-            return datetime.datetime.strptime(time_str, "%H:%M").time()
-        except ValueError:
-            return None
+        return self.limiter.parse_time_string(time_str)
 
     def _is_in_time_period(self, current_time_str, start_time_str, end_time_str):
         """检查当前时间是否在指定时间段内"""
-        if self.limiter:
-            return self.limiter.is_in_time_period(current_time_str, start_time_str, end_time_str)
-
-        # 使用内置实现（兼容旧代码）
-        current_time = self._parse_time_string(current_time_str)
-        start_time = self._parse_time_string(start_time_str)
-        end_time = self._parse_time_string(end_time_str)
-
-        if not all([current_time, start_time, end_time]):
-            return False
-
-        # 处理跨天的时间段（如 22:00 - 06:00）
-        if start_time <= end_time:
-            # 不跨天的时间段
-            return start_time <= current_time <= end_time
-        else:
-            # 跨天的时间段
-            return current_time >= start_time or current_time <= end_time
+        return self.limiter.is_in_time_period(current_time_str, start_time_str, end_time_str)
 
     def _get_current_time_period_limit(self):
         """获取当前时间段适用的限制"""
-        if self.limiter:
-            return self.limiter.get_current_time_period_limit()
-
-        # 使用内置实现（兼容旧代码）
-        current_time_str = datetime.datetime.now().strftime("%H:%M")
-
-        for time_limit in self.time_period_limits:
-            if self._is_in_time_period(
-                current_time_str, time_limit["start_time"], time_limit["end_time"]
-            ):
-                return time_limit["limit"]
-
-        return None  # 没有匹配的时间段限制
+        return self.limiter.get_current_time_period_limit()
 
     def _get_time_period_usage_key(self, user_id, group_id=None, time_period_id=None):
         """获取时间段使用次数的Redis键"""
@@ -1878,12 +1624,6 @@ class DailyLimitPlugin(star.Star):
         """
         记录使用情况
 
-        记录用户或群组的使用情况到Redis中，包括：
-        - 使用记录（按日期和时间）
-        - 使用统计更新
-        - 趋势数据分析
-        - 过期时间设置
-
         参数：
             user_id: 用户ID
             group_id: 群组ID（可选）
@@ -1892,60 +1632,7 @@ class DailyLimitPlugin(star.Star):
         返回：
             bool: 记录成功返回True，失败返回False
         """
-        if self.usage_tracker:
-            return self.usage_tracker.record_usage(user_id, group_id, usage_type)
-
-        # 使用内置实现（兼容旧代码）
-        if not self.redis:
-            return False
-
-        try:
-            # 记录详细使用信息
-            self._record_usage_details(user_id, group_id, usage_type)
-
-            # 更新统计信息
-            self._update_usage_stats(user_id, group_id)
-
-            # 记录趋势分析数据
-            self._record_trend_data(user_id, group_id, usage_type)
-
-            return True
-        except Exception as e:
-            self._log_error(
-                "记录使用记录失败 (用户: {}, 群组: {}): {}", user_id, group_id, str(e)
-            )
-            return False
-
-    def _record_usage_details(self, user_id, group_id, usage_type):
-        """记录详细使用信息"""
-        timestamp = datetime.datetime.now().isoformat()
-        record_key = self._get_usage_record_key(user_id, group_id)
-
-        # 创建使用记录数据
-        record_data = self._create_usage_record_data(
-            user_id, group_id, usage_type, timestamp
-        )
-
-        # 使用Redis列表存储使用记录
-        self.redis.rpush(record_key, json.dumps(record_data))
-
-        # 设置过期时间到下次重置时间
-        self._set_usage_record_expiry(record_key)
-
-    def _create_usage_record_data(self, user_id, group_id, usage_type, timestamp):
-        """创建使用记录数据"""
-        return {
-            "timestamp": timestamp,
-            "user_id": user_id,
-            "group_id": group_id,
-            "usage_type": usage_type,
-            "date": self._get_reset_period_date(),
-        }
-
-    def _set_usage_record_expiry(self, record_key):
-        """设置使用记录过期时间"""
-        seconds_until_tomorrow = self._get_seconds_until_tomorrow()
-        self.redis.expire(record_key, seconds_until_tomorrow)
+        return self.usage_tracker.record_usage(user_id, group_id, usage_type)
 
     def _update_usage_stats(self, user_id, group_id=None):
         """
