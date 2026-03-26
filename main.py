@@ -1,5 +1,6 @@
 import asyncio
 import datetime
+import importlib.util
 import json
 import os
 import sys
@@ -36,7 +37,7 @@ except ImportError:
     WebServer = None
     # 实际的日志记录将在插件初始化后进行
 
-# 核心模块导入
+# 核心模块导入 - 使用 importlib 从特定路径导入，避免与其他插件冲突
 Logger = None
 RedisClient = None
 ConfigManager = None
@@ -44,14 +45,29 @@ Limiter = None
 Security = None
 UsageTracker = None
 _import_error = None
-try:
-    # 添加当前目录到Python路径
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    if current_dir not in sys.path:
-        sys.path.insert(0, current_dir)
 
-    from core import Logger, RedisClient, ConfigManager, Limiter, Security, UsageTracker
-except ImportError as e:
+def _load_core_module(module_name):
+    """从插件的 core 目录加载模块"""
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    core_dir = os.path.join(current_dir, "core")
+    module_path = os.path.join(core_dir, f"{module_name}.py")
+
+    spec = importlib.util.spec_from_file_location(f"astrbot_daily_limit.core.{module_name}", module_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"无法为 {module_name} 创建模块规范")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[f"astrbot_daily_limit.core.{module_name}"] = module
+    spec.loader.exec_module(module)
+    return module
+
+try:
+    Logger = _load_core_module("logger").Logger
+    RedisClient = _load_core_module("redis_client").RedisClient
+    ConfigManager = _load_core_module("config_manager").ConfigManager
+    Limiter = _load_core_module("limiter").Limiter
+    Security = _load_core_module("security").Security
+    UsageTracker = _load_core_module("usage_tracker").UsageTracker
+except Exception as e:
     _import_error = str(e)
 
 
