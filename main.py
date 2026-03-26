@@ -44,6 +44,8 @@ ConfigManager = None
 Limiter = None
 Security = None
 UsageTracker = None
+MessageBuilder = None
+VersionChecker = None
 _import_error = None
 
 def _load_core_module(module_name):
@@ -67,6 +69,8 @@ try:
     Limiter = _load_core_module("limiter").Limiter
     Security = _load_core_module("security").Security
     UsageTracker = _load_core_module("usage_tracker").UsageTracker
+    MessageBuilder = _load_core_module("message_builder").MessageBuilder
+    VersionChecker = _load_core_module("version_checker").VersionChecker
 except Exception as e:
     _import_error = str(e)
 
@@ -106,7 +110,7 @@ class DailyLimitPlugin(star.Star):
         self.zero_usage_notified_users = {}  # 零使用次数提醒记录 {"user_id": last_notified_timestamp}
 
         # 初始化核心模块（必须最先初始化，因为其他代码依赖日志）
-        if Logger is None or RedisClient is None or ConfigManager is None or Limiter is None or Security is None or UsageTracker is None:
+        if Logger is None or RedisClient is None or ConfigManager is None or Limiter is None or Security is None or UsageTracker is None or MessageBuilder is None or VersionChecker is None:
             # 核心模块导入失败，无法继续
             error_msg = f"核心模块导入失败。导入错误: {_import_error}"
             raise RuntimeError(error_msg)
@@ -118,6 +122,8 @@ class DailyLimitPlugin(star.Star):
         self.limiter = Limiter(self)
         self.security = Security(self)
         self.usage_tracker = UsageTracker(self)
+        self.message_builder = MessageBuilder(self)
+        self.version_checker = VersionChecker(self)
 
         # 加载安全配置
         self.security.load_security_config()
@@ -148,7 +154,7 @@ class DailyLimitPlugin(star.Star):
             self._init_web_server()
 
         # 初始化版本检查功能
-        self._init_version_check()
+        self.version_checker.init_version_check()
 
     def _load_limits_from_config(self):
         """
@@ -1726,7 +1732,7 @@ class DailyLimitPlugin(star.Star):
             date_obj = current_time - datetime.timedelta(days=i)
 
             # 使用与_get_reset_period_date相同的逻辑
-            reset_time = self._get_reset_time()
+            reset_time = self.message_builder.get_reset_time()
             temp_current = datetime.datetime.combine(date_obj.date(), reset_time)
 
             if date_obj < temp_current:
@@ -2159,7 +2165,7 @@ class DailyLimitPlugin(star.Star):
             group_name = f"群组({group_id})" or "群组"
             group_mode = self._get_group_mode(group_id)
 
-            custom_message = self._get_custom_zero_usage_message(
+            custom_message = self.message_builder.get_custom_zero_usage_message(
                 usage, limit, user_name, group_name, group_mode
             )
 
@@ -2168,7 +2174,7 @@ class DailyLimitPlugin(star.Star):
             )
         else:
             user_name = event.get_sender_name()
-            custom_message = self._get_custom_zero_usage_message(
+            custom_message = self.message_builder.get_custom_zero_usage_message(
                 usage, limit, user_name, None, None
             )
             await event.send(MessageChain().message(custom_message))
@@ -2286,315 +2292,6 @@ class DailyLimitPlugin(star.Star):
 
         return True
 
-    def _generate_progress_bar(self, usage, limit, bar_length=10):
-        """生成进度条"""
-        if limit <= 0:
-            return ""
-
-        percentage = (usage / limit) * 100
-        filled_length = int(bar_length * usage // limit)
-        bar = "█" * filled_length + "░" * (bar_length - filled_length)
-
-        return f"[{bar}] {percentage:.1f}%"
-
-    def _get_custom_zero_usage_message(
-        self, usage, limit, user_name, group_name, group_mode=None
-    ):
-        """获取自定义的使用次数为0时的提醒消息"""
-        # 获取自定义消息配置
-        custom_messages = self.config["limits"].get("custom_messages", {})
-
-        # 计算剩余次数
-        remaining = limit - usage
-
-        # 根据不同的场景选择不同的消息模板
-        if group_mode is not None:
-            # 群组消息
-            if group_mode == "shared":
-                # 群组共享模式
-                message_template = custom_messages.get(
-                    "zero_usage_group_shared_message",
-                    "本群组AI访问次数已达上限（{usage}/{limit}），请稍后再试或联系管理员提升限额。",
-                )
-            else:
-                # 群组独立模式
-                message_template = custom_messages.get(
-                    "zero_usage_group_individual_message",
-                    "您在本群组的AI访问次数已达上限（{usage}/{limit}），请稍后再试或联系管理员提升限额。",
-                )
-        else:
-            # 私聊消息
-            message_template = custom_messages.get(
-                "zero_usage_message",
-                "您的AI访问次数已达上限（{usage}/{limit}），请稍后再试或联系管理员提升限额。",
-            )
-
-        # 替换模板中的变量
-        message = message_template.format(
-            usage=usage,
-            limit=limit,
-            remaining=remaining,
-            user_name=user_name or "用户",
-            group_name=group_name or "群组",
-        )
-
-        return message
-
-    def _get_reset_time(self):
-        """获取每日重置时间"""
-        # 获取配置的重置时间
-        reset_time_str = self.config["limits"].get("daily_reset_time", "00:00")
-
-        # 验证重置时间格式
-        try:
-            reset_hour, reset_minute = map(int, reset_time_str.split(":"))
-            if not (0 <= reset_hour <= 23 and 0 <= reset_minute <= 59):
-                raise ValueError("重置时间格式错误")
-            # 返回datetime.time对象
-            return datetime.time(reset_hour, reset_minute)
-        except (ValueError, AttributeError):
-            # 如果配置格式错误，使用默认的00:00
-            self._log_warning(
-                "重置时间配置格式错误: {}，使用默认值00:00", reset_time_str
-            )
-            return datetime.time(0, 0)
-
-    def _get_custom_message(self, message_type, default_message, **kwargs):
-        """获取自定义消息模板
-
-        Args:
-            message_type: 消息类型
-            default_message: 默认消息模板
-            **kwargs: 模板变量
-
-        Returns:
-            str: 格式化后的消息
-        """
-        # 获取自定义消息配置
-        custom_messages = self.config["limits"].get("custom_messages", {})
-
-        # 如果配置了自定义消息，则使用自定义消息，否则使用默认消息
-        template = custom_messages.get(message_type, default_message)
-
-        # 格式化消息模板
-        try:
-            return template.format(**kwargs)
-        except KeyError as e:
-            self._log_warning("消息模板变量错误: {}，使用默认消息", e)
-            return default_message.format(**kwargs)
-        except Exception as e:
-            self._log_error("消息模板格式化错误: {}", e)
-            return default_message
-
-    def _get_usage_tip(self, remaining, limit):
-        """根据剩余次数生成使用提示"""
-        # 优先使用配置项中的自定义提示文本
-        custom_tip = self.config["limits"].get(
-            "usage_tip", "每日限制次数会在重置时间自动恢复"
-        )
-
-        # 如果配置了自定义提示，直接返回
-        if custom_tip:
-            return custom_tip
-
-        # 否则使用智能提示逻辑
-        if remaining <= 0:
-            return "⚠️ 今日次数已用完，请明天再试"
-        elif remaining <= limit * 0.2:  # 剩余20%以下
-            return "⚠️ 剩余次数较少，请谨慎使用"
-        elif remaining <= limit * 0.5:  # 剩余50%以下
-            return "💡 剩余次数适中，可继续使用"
-        else:
-            return "✅ 剩余次数充足，可放心使用"
-
-    def _get_limit_type(self, user_id, group_id):
-        """获取限制类型描述"""
-        if str(user_id) in self.user_limits:
-            return "特定限制"
-        elif group_id and str(group_id) in self.group_limits:
-            return "群组限制"
-        else:
-            return "默认限制"
-
-    def _get_current_time_period_info(self, current_time_str):
-        """获取当前时间段信息"""
-        for period in self.time_period_limits:
-            if self._is_in_time_period(
-                current_time_str, period["start_time"], period["end_time"]
-            ):
-                return period
-        return None
-
-    def _build_exempt_user_status(
-        self, user_id, group_id, time_period_limit, current_time_str
-    ):
-        """构建豁免用户状态消息"""
-        group_context = "在本群组" if group_id is not None else ""
-
-        status_msg = self._get_custom_message(
-            "limit_status_exempt_message",
-            "🎉 您{group_context}没有调用次数限制（豁免用户）",
-            group_context=group_context,
-        )
-
-        # 添加时间段限制信息（即使豁免用户也显示）
-        if time_period_limit is not None:
-            current_period_info = self._get_current_time_period_info(current_time_str)
-            if current_period_info:
-                time_period_msg = self._get_custom_message(
-                    "limit_status_time_period_message",
-                    "\n\n⏰ 当前处于时间段限制：{start_time}-{end_time}\n📋 时间段限制：{time_period_limit} 次",
-                    start_time=current_period_info["start_time"],
-                    end_time=current_period_info["end_time"],
-                    time_period_limit=time_period_limit,
-                )
-                status_msg += time_period_msg
-
-        return status_msg
-
-    def _build_shared_group_status(self, user_id, group_id, limit, reset_time):
-        """构建群组共享模式状态消息"""
-        usage = self._get_group_usage(group_id)
-        remaining = limit - usage
-
-        # 检查是否显示进度条
-        show_progress = self.config["limits"].get("show_progress_bar", True)
-        progress_bar = (
-            self._generate_progress_bar(usage, limit) if show_progress else ""
-        )
-
-        # 检查是否显示剩余次数
-        show_remaining = self.config["limits"].get("show_remaining_count", True)
-        remaining_text = f"\n🎯 剩余次数：{remaining} 次" if show_remaining else ""
-
-        usage_tip = self._get_usage_tip(remaining, limit)
-        limit_type = "特定限制" if str(group_id) in self.group_limits else "默认限制"
-
-        # 构建消息模板
-        base_template = (
-            "👥 群组共享模式 - {limit_type}\n📊 今日已使用：{usage}/{limit} 次"
-        )
-        if show_progress:
-            base_template += "\n📈 {progress_bar}"
-        if show_remaining:
-            base_template += "\n🎯 剩余次数：{remaining} 次"
-        base_template += "\n\n💡 使用提示：{usage_tip}\n🔄 每日重置时间：{reset_time}"
-
-        return self._get_custom_message(
-            "limit_status_group_shared_message",
-            base_template,
-            limit_type=limit_type,
-            usage=usage,
-            limit=limit,
-            progress_bar=progress_bar,
-            remaining=remaining,
-            usage_tip=usage_tip,
-            reset_time=reset_time,
-        )
-
-    def _build_individual_group_status(self, user_id, group_id, limit, reset_time):
-        """构建群组独立模式状态消息"""
-        usage = self._get_user_usage(user_id, group_id)
-        remaining = limit - usage
-
-        # 检查是否显示进度条
-        show_progress = self.config["limits"].get("show_progress_bar", True)
-        progress_bar = (
-            self._generate_progress_bar(usage, limit) if show_progress else ""
-        )
-
-        # 检查是否显示剩余次数
-        show_remaining = self.config["limits"].get("show_remaining_count", True)
-        remaining_text = f"\n🎯 剩余次数：{remaining} 次" if show_remaining else ""
-
-        usage_tip = self._get_usage_tip(remaining, limit)
-        limit_type = self._get_limit_type(user_id, group_id)
-
-        # 构建消息模板
-        base_template = (
-            "👤 个人独立模式 - {limit_type}\n📊 今日已使用：{usage}/{limit} 次"
-        )
-        if show_progress:
-            base_template += "\n📈 {progress_bar}"
-        if show_remaining:
-            base_template += "\n🎯 剩余次数：{remaining} 次"
-        base_template += "\n\n💡 使用提示：{usage_tip}\n🔄 每日重置时间：{reset_time}"
-
-        return self._get_custom_message(
-            "limit_status_group_individual_message",
-            base_template,
-            limit_type=limit_type,
-            usage=usage,
-            limit=limit,
-            progress_bar=progress_bar,
-            remaining=remaining,
-            usage_tip=usage_tip,
-            reset_time=reset_time,
-        )
-
-    def _build_private_status(self, user_id, group_id, limit, reset_time):
-        """构建私聊状态消息"""
-        usage = self._get_user_usage(user_id, group_id)
-        remaining = limit - usage
-
-        # 检查是否显示进度条
-        show_progress = self.config["limits"].get("show_progress_bar", True)
-        progress_bar = (
-            self._generate_progress_bar(usage, limit) if show_progress else ""
-        )
-
-        # 检查是否显示剩余次数
-        show_remaining = self.config["limits"].get("show_remaining_count", True)
-        remaining_text = f"\n🎯 剩余次数：{remaining} 次" if show_remaining else ""
-
-        usage_tip = self._get_usage_tip(remaining, limit)
-
-        # 构建消息模板
-        base_template = "👤 个人使用状态\n📊 今日已使用：{usage}/{limit} 次"
-        if show_progress:
-            base_template += "\n📈 {progress_bar}"
-        if show_remaining:
-            base_template += "\n🎯 剩余次数：{remaining} 次"
-        base_template += "\n\n💡 使用提示：{usage_tip}\n🔄 每日重置时间：{reset_time}"
-
-        return self._get_custom_message(
-            "limit_status_private_message",
-            base_template,
-            usage=usage,
-            limit=limit,
-            progress_bar=progress_bar,
-            remaining=remaining,
-            usage_tip=usage_tip,
-            reset_time=reset_time,
-        )
-
-    def _add_time_period_info(
-        self, status_msg, user_id, group_id, time_period_limit, current_time_str
-    ):
-        """添加时间段限制信息到状态消息"""
-        if time_period_limit is not None:
-            current_period_info = self._get_current_time_period_info(current_time_str)
-            if current_period_info:
-                time_period_usage = self._get_time_period_usage(user_id, group_id)
-                time_period_remaining = time_period_limit - time_period_usage
-                time_period_progress = self._generate_progress_bar(
-                    time_period_usage, time_period_limit
-                )
-
-                time_period_msg = self._get_custom_message(
-                    "limit_status_time_period_message",
-                    "\n\n⏰ 当前处于时间段限制：{start_time}-{end_time}\n📋 时间段限制：{time_period_limit} 次\n📊 时间段内已使用：{time_period_usage}/{time_period_limit} 次\n📈 {time_period_progress}\n🎯 时间段内剩余：{time_period_remaining} 次",
-                    start_time=current_period_info["start_time"],
-                    end_time=current_period_info["end_time"],
-                    time_period_limit=time_period_limit,
-                    time_period_usage=time_period_usage,
-                    time_period_progress=time_period_progress,
-                    time_period_remaining=time_period_remaining,
-                )
-                status_msg += time_period_msg
-
-        return status_msg
-
     @filter.command("limit_status")
     async def limit_status(self, event: AstrMessageEvent):
         """用户查看当前使用状态"""
@@ -2625,30 +2322,30 @@ class DailyLimitPlugin(star.Star):
 
         # 首先检查用户是否被豁免（优先级最高）
         if str(user_id) in self.config["limits"]["exempt_users"]:
-            status_msg = self._build_exempt_user_status(
+            status_msg = self.message_builder.build_exempt_user_status(
                 user_id, group_id, time_period_limit, current_time_str
             )
         else:
-            reset_time = self._get_reset_time()
+            reset_time = self.message_builder.get_reset_time()
 
             # 根据群组模式显示正确的状态信息
             if group_id is not None:
                 group_mode = self._get_group_mode(group_id)
                 if group_mode == "shared":
-                    status_msg = self._build_shared_group_status(
+                    status_msg = self.message_builder.build_shared_group_status(
                         user_id, group_id, limit, reset_time
                     )
                 else:
-                    status_msg = self._build_individual_group_status(
+                    status_msg = self.message_builder.build_individual_group_status(
                         user_id, group_id, limit, reset_time
                     )
             else:
-                status_msg = self._build_private_status(
+                status_msg = self.message_builder.build_private_status(
                     user_id, group_id, limit, reset_time
                 )
 
             # 添加时间段限制信息
-            status_msg = self._add_time_period_info(
+            status_msg = self.message_builder.add_time_period_info(
                 status_msg, user_id, group_id, time_period_limit, current_time_str
             )
 
@@ -4896,207 +4593,6 @@ class DailyLimitPlugin(star.Star):
         except Exception as e:
             self._log_error("保存时间段限制配置失败: {}", str(e))
 
-    def _init_version_check(self):
-        """初始化版本检查功能"""
-        try:
-            # 检查是否启用版本检查功能
-            if not self.config["version_check"].get("enabled", True):
-                self._log_info("版本检查功能已禁用")
-                return
-
-            # 启动版本检查异步任务
-            self.version_check_task = asyncio.create_task(self._version_check_loop())
-            self._log_info(
-                "版本检查功能已启动，检查间隔：{} 分钟",
-                self.config["version_check"].get("check_interval", 60),
-            )
-
-        except Exception as e:
-            self._handle_error(e, "初始化版本检查功能")
-
-    async def _version_check_loop(self):
-        """版本检查循环任务"""
-        while True:
-            try:
-                # 获取检查间隔（分钟）
-                check_interval = self.config["version_check"].get("check_interval", 60)
-
-                # 执行版本检查
-                await self._check_version_update()
-
-                # 等待指定时间后再次检查
-                await asyncio.sleep(check_interval * 60)
-
-            except Exception as e:
-                self._handle_error(e, "版本检查循环任务")
-                # 出错后等待5分钟再重试
-                await asyncio.sleep(300)
-
-    async def _check_version_update(self):
-        """检查版本更新"""
-        try:
-            # 获取版本检查URL
-            check_url = self.config["version_check"].get(
-                "check_url", "https://box.firefly520.top/limit_update.txt"
-            )
-
-            self._log_info("开始检查版本更新")
-
-            # 发送HTTP请求获取版本信息
-            async with aiohttp.ClientSession() as session:
-                async with session.get(check_url, timeout=30) as response:
-                    if response.status != 200:
-                        self._log_warning(
-                            "版本检查请求失败，状态码: {}", response.status
-                        )
-                        return
-
-                    content = await response.text()
-
-            # 解析版本信息
-            version_info = self._parse_version_info(content)
-            if not version_info:
-                self._log_warning("版本信息解析失败")
-                return
-
-            self.last_checked_version = version_info["version"]
-            self.last_checked_version_info = version_info  # 存储完整的版本信息
-
-            # 比较版本号
-            current_version = self.config.get("version", "v2.8.7")
-            if self._compare_versions(version_info["version"], current_version) > 0:
-                # 检测到新版本
-                self._log_info(
-                    "检测到新版本: {} -> {}", current_version, version_info["version"]
-                )
-
-                # 检查是否需要发送通知
-                # 如果配置了重复通知或版本不同，则发送通知
-                repeat_notification = self.config["version_check"].get(
-                    "repeat_notification", False
-                )
-                if (
-                    repeat_notification
-                    or self.last_notified_version != version_info["version"]
-                ):
-                    await self._send_version_notification(current_version, version_info)
-                    self.last_notified_version = version_info["version"]
-                else:
-                    self._log_info(
-                        "已发送过版本 {} 的通知，跳过重复发送", version_info["version"]
-                    )
-            else:
-                self._log_info("当前已是最新版本: {}", current_version)
-
-        except asyncio.TimeoutError:
-            self._log_warning("版本检查请求超时")
-        except Exception as e:
-            self._handle_error(e, "检查版本更新")
-
-    def _parse_version_info(self, content: str) -> dict:
-        """解析版本信息文件内容"""
-        try:
-            version_info = {}
-            lines = content.strip().split("\n")
-
-            for line in lines:
-                line = line.strip()
-                if line.startswith("v："):
-                    version_info["version"] = line[2:].strip()
-                elif line.startswith("c："):
-                    version_info["content"] = line[2:].strip()
-
-            # 验证必需字段
-            if "version" not in version_info:
-                self._log_warning("版本信息文件中缺少版本号")
-                return None
-
-            return version_info
-
-        except Exception as e:
-            self._handle_error(e, "解析版本信息")
-            return None
-
-    def _compare_versions(self, version1: str, version2: str) -> int:
-        """比较两个版本号
-
-        Args:
-            version1: 第一个版本号
-            version2: 第二个版本号
-
-        Returns:
-            int: 1表示version1 > version2, -1表示version1 < version2, 0表示相等
-        """
-        try:
-            # 移除版本号前缀（如"v"）
-            v1 = version1.lstrip("vV")
-            v2 = version2.lstrip("vV")
-
-            # 分割版本号
-            parts1 = v1.split(".")
-            parts2 = v2.split(".")
-
-            # 比较每个部分
-            for i in range(max(len(parts1), len(parts2))):
-                p1 = int(parts1[i]) if i < len(parts1) else 0
-                p2 = int(parts2[i]) if i < len(parts2) else 0
-
-                if p1 > p2:
-                    return 1
-                elif p1 < p2:
-                    return -1
-
-            return 0
-
-        except Exception as e:
-            self._handle_error(e, "比较版本号")
-            return 0
-
-    async def _send_version_notification(
-        self, current_version: str, version_info: dict
-    ):
-        """发送新版本通知给管理员"""
-        try:
-            # 获取管理员用户列表
-            admin_users = self.config["version_check"].get("admin_users", [])
-            if not admin_users:
-                self._log_warning("未配置管理员用户，无法发送版本更新通知")
-                return
-
-            # 获取通知消息模板
-            template = self.config["version_check"].get(
-                "notification_message",
-                "🚀 检测到新版本可用！\n📦 当前版本：{current_version}\n🆕 最新版本：{new_version}\n📝 更新内容：{update_content}\n🔗 下载地址：{download_url}",
-            )
-
-            # 格式化消息
-            message = template.format(
-                current_version=current_version,
-                new_version=version_info.get("version", "未知"),
-                update_content=version_info.get("content", "暂无更新说明"),
-                download_url="https://github.com/left666/astrbot_plugin_daily_limit",
-            )
-
-            # 发送给每个管理员
-            for user_id in admin_users:
-                try:
-                    # 创建消息链
-                    message_chain = MessageChain().message(message)
-
-                    # 构建会话唯一标识（格式：平台:消息类型:会话ID）
-                    # 对于私聊消息，格式为：QQ:FriendMessage:用户ID
-                    unified_msg_origin = f"QQ:FriendMessage:{user_id}"
-
-                    # 发送主动消息给管理员
-                    await self.context.send_message(unified_msg_origin, message_chain)
-                    self._log_info("已发送新版本通知给管理员: {}", user_id)
-
-                except Exception as e:
-                    self._handle_error(e, f"发送版本通知给管理员 {user_id}")
-
-        except Exception as e:
-            self._handle_error(e, "发送版本通知")
-
     @filter.permission_type(PermissionType.ADMIN)
     @limit_command_group.command("checkupdate")
     async def limit_checkupdate(self, event: AstrMessageEvent):
@@ -5115,26 +4611,26 @@ class DailyLimitPlugin(star.Star):
             event.set_result(MessageEventResult().message("🔍 正在检查版本更新..."))
 
             # 执行版本检查
-            await self._check_version_update()
+            await self.version_checker.check_version_update()
 
             # 检查是否有新版本
             current_version = self.config.get("version", "v2.8.7")
-            if self.last_checked_version:
+            if self.version_checker.last_checked_version:
                 if (
-                    self._compare_versions(self.last_checked_version, current_version)
+                    self.version_checker._compare_versions(self.version_checker.last_checked_version, current_version)
                     > 0
                 ):
                     # 有新版本
                     update_content = (
-                        self.last_checked_version_info.get("content", "暂无更新说明")
-                        if hasattr(self, "last_checked_version_info")
+                        self.version_checker.last_checked_version_info.get("content", "暂无更新说明")
+                        if hasattr(self.version_checker, "last_checked_version_info")
                         else "暂无更新说明"
                     )
                     event.set_result(
                         MessageEventResult().message(
                             f"AstrBot-每日限制插件 DailyLimit\n\n🎉 检测到新版本可用！\n"
                             f"📦 当前版本：{current_version}\n"
-                            f"🆕 最新版本：{self.last_checked_version}\n"
+                            f"🆕 最新版本：{self.version_checker.last_checked_version}\n"
                             f"📝 更新内容：{update_content}\n"
                             f"🔗 下载地址：https://github.com/left666/astrbot_plugin_daily_limit"
                             f"\nCiallo～(∠・ω< )⌒★"
