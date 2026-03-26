@@ -37,15 +37,21 @@ except ImportError:
     # 实际的日志记录将在插件初始化后进行
 
 # 核心模块导入
+Logger = None
+RedisClient = None
+ConfigManager = None
+Limiter = None
+Security = None
+UsageTracker = None
 try:
+    # 添加当前目录到Python路径
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    if current_dir not in sys.path:
+        sys.path.insert(0, current_dir)
+
     from core import Logger, RedisClient, ConfigManager, Limiter, Security, UsageTracker
 except ImportError:
-    Logger = None
-    RedisClient = None
-    ConfigManager = None
-    Limiter = None
-    Security = None
-    UsageTracker = None
+    pass
 
 
 @star.register(
