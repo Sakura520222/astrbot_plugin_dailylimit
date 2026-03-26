@@ -3411,9 +3411,9 @@ class DailyLimitPlugin(star.Star):
 
     @filter.permission_type(PermissionType.ADMIN)
     @limit_command_group.command("help")
-    def _build_basic_management_help(self) -> str:
+    def _build_basic_management_help(self, event: AstrMessageEvent):
         """构建基础管理命令帮助信息"""
-        return (
+        help_text = (
             "📋 基础管理命令：\n"
             "├── /limit help - 显示此帮助信息\n"
             "├── /limit set <用户ID> <次数> - 设置特定用户的每日限制次数\n"
@@ -3430,6 +3430,7 @@ class DailyLimitPlugin(star.Star):
             "├── /limit list_user - 列出所有用户特定限制\n"
             "└── /limit list_group - 列出所有群组特定限制\n"
         )
+        event.set_result(MessageEventResult().message(help_text))
 
     def _build_time_period_help(self) -> str:
         """构建时间段限制命令帮助信息"""
