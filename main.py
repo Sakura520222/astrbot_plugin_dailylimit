@@ -3411,7 +3411,7 @@ class DailyLimitPlugin(star.Star):
 
     @filter.permission_type(PermissionType.ADMIN)
     @limit_command_group.command("help")
-    def _build_basic_management_help(self, event: AstrMessageEvent):
+    async def _build_basic_management_help(self, event: AstrMessageEvent):
         """构建基础管理命令帮助信息"""
         help_text = (
             "📋 基础管理命令：\n"
