@@ -41,6 +41,7 @@ except ImportError:
 Logger = None
 RedisClient = None
 ConfigManager = None
+ConfigLoader = None
 Limiter = None
 Security = None
 UsageTracker = None
@@ -49,6 +50,10 @@ VersionChecker = None
 HelpManager = None
 StatsAnalyzer = None
 TimePeriodManager = None
+WebManager = None
+RedisKeys = None
+SecurityHandler = None
+MessagesHandler = None
 _import_error = None
 
 def _load_core_module(module_name):
@@ -69,6 +74,7 @@ try:
     Logger = _load_core_module("logger").Logger
     RedisClient = _load_core_module("redis_client").RedisClient
     ConfigManager = _load_core_module("config_manager").ConfigManager
+    ConfigLoader = _load_core_module("config_loader").ConfigLoader
     Limiter = _load_core_module("limiter").Limiter
     Security = _load_core_module("security").Security
     UsageTracker = _load_core_module("usage_tracker").UsageTracker
@@ -77,6 +83,10 @@ try:
     HelpManager = _load_core_module("help_manager").HelpManager
     StatsAnalyzer = _load_core_module("stats_analyzer").StatsAnalyzer
     TimePeriodManager = _load_core_module("time_period_manager").TimePeriodManager
+    WebManager = _load_core_module("web_manager").WebManager
+    RedisKeys = _load_core_module("redis_keys").RedisKeys
+    SecurityHandler = _load_core_module("security_handler").SecurityHandler
+    MessagesHandler = _load_core_module("messages_handler").MessagesHandler
 except Exception as e:
     _import_error = str(e)
 
@@ -116,7 +126,13 @@ class DailyLimitPlugin(star.Star):
         self.zero_usage_notified_users = {}  # 零使用次数提醒记录 {"user_id": last_notified_timestamp}
 
         # 初始化核心模块（必须最先初始化，因为其他代码依赖日志）
-        if Logger is None or RedisClient is None or ConfigManager is None or Limiter is None or Security is None or UsageTracker is None or MessageBuilder is None or VersionChecker is None or HelpManager is None or StatsAnalyzer is None or TimePeriodManager is None:
+        required_modules = [
+            Logger, RedisClient, ConfigManager, ConfigLoader, Limiter, Security,
+            UsageTracker, MessageBuilder, VersionChecker, HelpManager,
+            StatsAnalyzer, TimePeriodManager, WebManager, RedisKeys,
+            SecurityHandler, MessagesHandler
+        ]
+        if any(m is None for m in required_modules):
             # 核心模块导入失败，无法继续
             error_msg = f"核心模块导入失败。导入错误: {_import_error}"
             raise RuntimeError(error_msg)
@@ -125,6 +141,7 @@ class DailyLimitPlugin(star.Star):
         self.logger = Logger(self)
         self.redis_client = RedisClient(self)
         self.config_mgr = ConfigManager(self)
+        self.config_loader = ConfigLoader(self)
         self.limiter = Limiter(self)
         self.security = Security(self)
         self.usage_tracker = UsageTracker(self)
@@ -133,18 +150,13 @@ class DailyLimitPlugin(star.Star):
         self.help_manager = HelpManager(self)
         self.stats_analyzer = StatsAnalyzer(self)
         self.time_period_mgr = TimePeriodManager(self)
+        self.web_manager = WebManager(self)
+        self.redis_keys = RedisKeys(self)
+        self.security_handler = SecurityHandler(self)
+        self.messages_handler = MessagesHandler(self)
 
-        # 加载安全配置
-        self.security.load_security_config()
-
-        # 加载群组和用户特定限制
-        self.config_mgr.load_limits_from_config()
-        # 将配置数据引用到实例变量，保持向后兼容
-        self.group_limits = self.config_mgr.group_limits
-        self.user_limits = self.config_mgr.user_limits
-        self.group_modes = self.config_mgr.group_modes
-        self.time_period_limits = self.config_mgr.time_period_limits
-        self.skip_patterns = self.config_mgr.skip_patterns
+        # 加载群组和用户特定限制（通过ConfigLoader模块）
+        self.config_loader.load_limits_from_config()
 
         # 将安全模块数据引用到实例变量，保持向后兼容
         self.abuse_records = self.security.abuse_records
@@ -155,109 +167,39 @@ class DailyLimitPlugin(star.Star):
         # 初始化Redis连接
         self._init_redis()
 
-        # 检查Web服务器模块是否成功导入
+        # 初始化Web服务器（通过WebManager模块）
         if WebServer is None:
             self._log_warning("Web服务器模块导入失败，Web管理界面功能将不可用")
         else:
             # 初始化Web服务器
-            self._init_web_server()
+            self.web_manager.init_web_server()
+            # 同步web_server引用
+            self.web_server = self.web_manager.web_server
 
         # 初始化版本检查功能
         self.version_checker.init_version_check()
 
     def _load_limits_from_config(self):
-        """
-        从配置文件加载群组和用户特定限制
-
-        从插件的配置文件中加载所有限制相关设置，包括：
-        - 群组限制配置
-        - 用户限制配置
-        - 群组模式配置
-        - 时间段限制配置
-        - 忽略模式配置
-        - 每日重置时间验证
-
-        返回：
-            bool: 加载成功返回True，失败返回False
-        """
-        self._parse_group_limits()
-        self._parse_user_limits()
-        self._parse_group_modes()
-        self._parse_time_period_limits()
-        self._load_skip_patterns()
-        self._validate_daily_reset_time()
-
-        self._log_info(
-            "已加载 {} 个群组限制、{} 个用户限制、{} 个群组模式配置、{} 个时间段限制和{} 个忽略模式",
-            len(self.group_limits),
-            len(self.user_limits),
-            len(self.group_modes),
-            len(self.time_period_limits),
-            len(self.skip_patterns),
-        )
-
-        # 加载安全配置
-        self._load_security_config()
+        """从配置文件加载群组和用户特定限制（代理方法）"""
+        self.config_loader.load_limits_from_config()
 
     def _parse_limits_config(
         self, config_key: str, limits_dict: dict, limit_type: str
     ) -> None:
-        """
-        通用限制配置解析方法
-
-        Args:
-            config_key: 配置键名
-            limits_dict: 目标限制字典
-            limit_type: 限制类型描述
-        """
-        config_value = self.config["limits"].get(config_key, "")
-
-        # 处理配置值，兼容字符串和列表两种格式
-        if isinstance(config_value, str):
-            # 如果是字符串，按换行符分割并过滤空值
-            lines = [
-                line.strip()
-                for line in config_value.strip().split("\n")
-                if line.strip()
-            ]
-        elif isinstance(config_value, list):
-            # 如果是列表，确保所有元素都是字符串并过滤空值
-            lines = [str(line).strip() for line in config_value if str(line).strip()]
-        else:
-            # 其他类型，转换为字符串处理
-            lines = [str(config_value).strip()]
-
-        for line in lines:
-            self._parse_limit_line(line, limits_dict, limit_type)
+        """通用限制配置解析方法（代理方法）"""
+        self.config_loader.parse_limits_config(config_key, limits_dict, limit_type)
 
     def _parse_group_limits(self):
-        """解析群组特定限制配置"""
-        self._parse_limits_config("group_limits", self.group_limits, "群组")
+        """解析群组特定限制配置（代理方法）"""
+        self.config_loader.parse_group_limits()
 
     def _parse_user_limits(self):
-        """解析用户特定限制配置"""
-        self._parse_limits_config("user_limits", self.user_limits, "用户")
+        """解析用户特定限制配置（代理方法）"""
+        self.config_loader.parse_user_limits()
 
     def _parse_config_lines(self, config_text, parser_func):
-        """通用配置行解析器"""
-        if not config_text:
-            return
-
-        # 处理配置文本，兼容字符串和列表两种格式
-        if isinstance(config_text, str):
-            # 如果是字符串，按换行符分割并过滤空值
-            lines = [
-                line.strip() for line in config_text.strip().split("\n") if line.strip()
-            ]
-        elif isinstance(config_text, list):
-            # 如果是列表，确保所有元素都是字符串并过滤空值
-            lines = [str(line).strip() for line in config_text if str(line).strip()]
-        else:
-            # 其他类型，转换为字符串处理
-            lines = [str(config_text).strip()]
-
-        for line in lines:
-            parser_func(line)
+        """通用配置行解析器（代理方法）"""
+        self.config_loader.parse_config_lines(config_text, parser_func)
 
     def _log(self, level: str, message: str, *args) -> None:
         """统一的日志记录方法"""
@@ -302,198 +244,64 @@ class DailyLimitPlugin(star.Star):
         return result
 
     def _validate_config_structure(self) -> bool:
-        """
-        验证配置结构完整性
-
-        Returns:
-            bool: 配置结构是否完整
-        """
-        required_sections = ["limits", "redis"]
-        required_limits_fields = [
-            "default_daily_limit",
-            "exempt_users",
-            "group_limits",
-            "user_limits",
-        ]
-
-        try:
-            # 检查必需配置段
-            for section in required_sections:
-                if section not in self.config:
-                    self._log_error("配置缺少必需段: {}", section)
-                    return False
-
-            # 检查limits段必需字段
-            for field in required_limits_fields:
-                if field not in self.config["limits"]:
-                    self._log_error("limits配置缺少必需字段: {}", field)
-                    return False
-
-            return True
-        except Exception as e:
-            self._handle_error(e, "配置结构验证")
-            return False
+        """验证配置结构完整性（代理方法）"""
+        return self.config_loader.validate_config_structure()
 
     def _safe_parse_int(self, value_str, default=None):
-        """安全解析整数，避免重复的异常处理"""
-        try:
-            return int(value_str)
-        except (ValueError, TypeError):
-            return default
+        """安全解析整数（代理方法）"""
+        return self.config_loader.safe_parse_int(value_str, default)
 
     def _validate_config_line(self, line, required_separator=":", min_parts=2):
-        """验证配置行格式"""
-        line = line.strip()
-        if not line or required_separator not in line:
-            return None
-
-        parts = line.split(required_separator, min_parts - 1)
-        if len(parts) < min_parts:
-            return None
-
-        return parts
+        """验证配置行格式（代理方法）"""
+        return self.config_loader.validate_config_line(line, required_separator, min_parts)
 
     def _parse_limit_line(self, line, limits_dict, limit_type):
-        """解析单行限制配置"""
-        parts = self._validate_config_line(line)
-        if not parts:
-            return
-
-        entity_id = parts[0].strip()
-        limit_str = parts[1].strip()
-
-        limit = self._safe_parse_int(limit_str)
-        if entity_id and limit is not None:
-            limits_dict[entity_id] = limit
-        else:
-            self._log_warning("{}限制配置格式错误: {}", limit_type, line)
+        """解析单行限制配置（代理方法）"""
+        self.config_loader.parse_limit_line(line, limits_dict, limit_type)
 
     def _parse_group_modes(self):
-        """解析群组模式配置"""
-        group_mode_text = self.config["limits"].get("group_mode_settings", "")
-        self._parse_config_lines(group_mode_text, self._parse_group_mode_line)
+        """解析群组模式配置（代理方法）"""
+        self.config_loader.parse_group_modes()
 
     def _parse_group_mode_line(self, line):
-        """解析单行群组模式配置"""
-        parts = self._validate_config_line(line)
-        if not parts:
-            return
-
-        group_id = parts[0].strip()
-        mode = parts[1].strip()
-
-        if group_id and mode in ["shared", "individual"]:
-            self.group_modes[group_id] = mode
-        else:
-            self._log_warning("群组模式配置格式错误: {}", line)
+        """解析单行群组模式配置（代理方法）"""
+        self.config_loader.parse_group_mode_line(line)
 
     def _load_skip_patterns(self):
-        """加载忽略模式配置"""
-        self.skip_patterns = self.config["limits"].get("skip_patterns", ["#", "*"])
+        """加载忽略模式配置（代理方法）"""
+        self.config_loader.load_skip_patterns()
 
     def _load_security_config(self):
-        """加载安全配置"""
-        try:
-            security_config = self.config.get("security", {})
-
-            # 加载基础配置
-            self._load_basic_security_config(security_config)
-
-            # 加载检测阈值配置
-            self._load_detection_thresholds(security_config)
-
-            # 加载自动限制配置
-            self._load_auto_block_config(security_config)
-
-            # 加载通知配置
-            self._load_notification_config(security_config)
-
-            # 初始化通知记录
-            self._init_notification_records()
-
-            self._log_info(
-                "安全配置加载完成，防刷机制{}",
-                "已启用" if self.anti_abuse_enabled else "未启用",
-            )
-
-        except Exception as e:
-            self._log_error("加载安全配置失败: {}", str(e))
-            # 使用默认值
-            self._set_default_security_config()
+        """加载安全配置（代理方法）"""
+        self.config_loader.load_security_config()
 
     def _load_basic_security_config(self, security_config):
-        """加载基础安全配置"""
-        self.anti_abuse_enabled = security_config.get("anti_abuse_enabled", False)
+        """加载基础安全配置（代理方法）"""
+        self.config_loader.load_basic_security_config(security_config)
 
     def _load_detection_thresholds(self, security_config):
-        """加载检测阈值配置"""
-        self.rapid_request_threshold = security_config.get(
-            "rapid_request_threshold", 10
-        )  # 10秒内请求次数
-        self.rapid_request_window = security_config.get(
-            "rapid_request_window", 10
-        )  # 时间窗口（秒）
-        self.consecutive_request_threshold = security_config.get(
-            "consecutive_request_threshold", 5
-        )  # 连续请求次数
-        self.consecutive_request_window = security_config.get(
-            "consecutive_request_window", 30
-        )  # 时间窗口（秒）
+        """加载检测阈值配置（代理方法）"""
+        self.config_loader.load_detection_thresholds(security_config)
 
     def _load_auto_block_config(self, security_config):
-        """加载自动限制配置"""
-        self.auto_block_duration = security_config.get(
-            "auto_block_duration", 300
-        )  # 自动限制时长（秒）
-        self.block_notification_template = security_config.get(
-            "block_notification_template",
-            "检测到异常使用行为，您已被临时限制使用{auto_block_duration}秒",
-        )
+        """加载自动限制配置（代理方法）"""
+        self.config_loader.load_auto_block_config(security_config)
 
     def _load_notification_config(self, security_config):
-        """加载通知配置"""
-        self.admin_notification_enabled = security_config.get(
-            "admin_notification_enabled", True
-        )
-
-        # 处理admin_users配置，兼容字符串和列表两种格式
-        admin_users = security_config.get("admin_users", [])
-        if isinstance(admin_users, str):
-            # 如果是字符串，按换行符分割并过滤空值
-            self.admin_users = [
-                user.strip() for user in admin_users.split("\n") if user.strip()
-            ]
-        else:
-            # 如果是列表或其他可迭代类型，直接使用并确保所有元素都是字符串
-            self.admin_users = [
-                str(user).strip() for user in admin_users if str(user).strip()
-            ]
-
-        self.notification_cooldown = security_config.get(
-            "notification_cooldown", 300
-        )  # 通知冷却时间（秒）
+        """加载通知配置（代理方法）"""
+        self.config_loader.load_notification_config(security_config)
 
     def _init_notification_records(self):
-        """初始化通知记录"""
-        self.notified_users = {}  # 已通知用户记录 {"user_id": "last_notification_time"}
-        self.notified_admins = {}  # 已通知管理员记录 {"user_id": "last_admin_notification_time"}
+        """初始化通知记录（代理方法）"""
+        self.config_loader.init_notification_records()
 
     def _set_default_security_config(self):
-        """设置默认安全配置"""
-        self.anti_abuse_enabled = False
-        self.rapid_request_threshold = 10
-        self.rapid_request_window = 10
-        self.consecutive_request_threshold = 5
-        self.consecutive_request_window = 30
-        self.auto_block_duration = 300
-        self.block_notification_template = (
-            "检测到异常使用行为，您已被临时限制使用{auto_block_duration}秒"
-        )
-        self.admin_notification_enabled = True
-        self.admin_users = []
-        self.notification_cooldown = 300
-        self.notified_users = {}
-        self.notified_admins = {}
+        """设置默认安全配置（代理方法）"""
+        self.config_loader.set_default_security_config()
+
+    def _validate_daily_reset_time(self):
+        """验证每日重置时间配置（代理方法）"""
+        self.config_loader.validate_daily_reset_time()
 
     def _detect_abuse_behavior(self, user_id, timestamp=None):
         """检测异常使用行为
@@ -969,96 +777,45 @@ class DailyLimitPlugin(star.Star):
 
     def _init_web_server(self):
         """
-        初始化Web服务器
-
-        创建并启动Web服务器实例，提供状态管理和错误处理。
+        初始化Web服务器（代理方法）
 
         返回：
             bool: 初始化成功返回True，失败返回False
         """
-        if WebServer is None:
-            self._log_warning("Web服务器模块不可用，跳过Web服务器初始化")
-            return False
-
-        try:
-            # 检查Web服务器是否已经在运行
-            if self._is_web_server_running():
-                self._log_info("Web服务器已经在运行中")
-                return True
-
-            # 获取Web服务器配置并创建实例
-            self.web_server = self._create_web_server_instance()
-
-            # 启动Web服务器
-            success = self._start_web_server()
-
-            if success:
-                self._handle_web_server_start_success()
-            else:
-                self._handle_web_server_start_failure()
-
-            return success
-
-        except Exception as e:
-            self._handle_web_server_init_error(e)
-            return False
+        return self.web_manager.init_web_server()
 
     def _create_web_server_instance(self):
-        """创建Web服务器实例"""
+        """创建Web服务器实例（代理方法）"""
+        from web_server import WebServer as _WebServer
         web_config = self.config.get("web_server", {})
         host = web_config.get("host", "127.0.0.1")
         port = web_config.get("port", 10245)
         domain = web_config.get("domain", "")
-
-        return WebServer(self, host=host, port=port, domain=domain)
+        return _WebServer(self, host=host, port=port, domain=domain)
 
     def _start_web_server(self):
-        """启动Web服务器"""
-        return self.web_server.start_async()
+        """启动Web服务器（代理方法）"""
+        return self.web_manager.start_web_server()
 
     def _handle_web_server_start_success(self):
-        """处理Web服务器启动成功的情况"""
-        # 更新线程引用
-        self.web_server_thread = self.web_server._server_thread
-
-        # 记录访问地址
-        self._log_web_server_access_url()
-
-        # 记录服务器状态
-        self._log_info("Web服务器状态: {}", self.get_web_server_status())
+        """处理Web服务器启动成功的情况（代理方法）"""
+        self.web_manager.handle_web_server_start_success()
 
     def _log_web_server_access_url(self):
-        """记录Web服务器访问地址"""
-        web_config = self.config.get("web_server", {})
-        domain = web_config.get("domain", "")
-
-        if domain:
-            access_url = self.web_server.get_access_url()
-            self._log_info("Web管理界面已启动，访问地址: {}", access_url)
-        else:
-            actual_port = self.web_server.port
-            host = web_config.get("host", "127.0.0.1")
-            self._log_info(
-                "Web管理界面已启动，访问地址: http://{}:{}", host, actual_port
-            )
+        """记录Web服务器访问地址（代理方法）"""
+        self.web_manager.log_web_server_access_url()
 
     def _handle_web_server_start_failure(self):
-        """处理Web服务器启动失败的情况"""
-        error_msg = "Web服务器启动失败"
-        if self.web_server._last_error:
-            error_msg += f": {self.web_server._last_error}"
-        self._log_error(error_msg)
-        self.web_server = None
+        """处理Web服务器启动失败的情况（代理方法）"""
+        self.web_manager.handle_web_server_start_failure()
 
     def _handle_web_server_init_error(self, error):
-        """处理Web服务器初始化错误"""
-        error_msg = f"Web服务器初始化失败: {str(error)}"
-        self._log_error(error_msg)
-        self.web_server = None
+        """处理Web服务器初始化错误（代理方法）"""
+        self.web_manager.handle_web_server_init_error(error)
 
     def _is_web_server_running(self):
         """
-        检查Web服务器是否正在运行
+        检查Web服务器是否正在运行（代理方法）
 
         返回：
             bool: Web服务器是否正在运行
@@ -1078,130 +835,50 @@ class DailyLimitPlugin(star.Star):
             return self.web_server.get_status()
         return None
 
+    # Redis键生成代理方法
     def _get_today_key(self):
-        """获取考虑自定义重置时间的日期键"""
-        # 获取配置的重置时间
-        reset_time_str = self.config["limits"].get("daily_reset_time", "00:00")
-
-        # 解析重置时间
-        try:
-            reset_hour, reset_minute = map(int, reset_time_str.split(":"))
-            if not (0 <= reset_hour <= 23 and 0 <= reset_minute <= 59):
-                raise ValueError("重置时间格式错误")
-        except (ValueError, AttributeError):
-            # 如果配置格式错误，使用默认的00:00
-            reset_hour, reset_minute = 0, 0
-            self._log_warning(
-                "重置时间配置格式错误: {}，使用默认值00:00", reset_time_str
-            )
-
-        now = datetime.datetime.now()
-
-        # 如果当前时间还没到重置时间，那么属于"昨天"的统计周期
-        # 如果当前时间已经到了或超过重置时间，那么属于"今天"的统计周期
-        current_reset_time = now.replace(
-            hour=reset_hour, minute=reset_minute, second=0, microsecond=0
-        )
-
-        if now >= current_reset_time:
-            # 当前时间已到达或超过重置时间，使用今天的日期
-            today = now.strftime("%Y-%m-%d")
-        else:
-            # 当前时间还没到重置时间，使用昨天的日期
-            yesterday = now - datetime.timedelta(days=1)
-            today = yesterday.strftime("%Y-%m-%d")
-
-        return f"astrbot:daily_limit:{today}"
+        """获取考虑自定义重置时间的日期键（代理方法）"""
+        return self.redis_keys.get_today_key()
 
     def _get_user_key(self, user_id, group_id=None):
-        """获取用户在特定群组的Redis键"""
-        if group_id is None:
-            group_id = "private_chat"
-
-        return f"{self._get_today_key()}:{group_id}:{user_id}"
+        """获取用户在特定群组的Redis键（代理方法）"""
+        return self.redis_keys.get_user_key(user_id, group_id)
 
     def _get_group_key(self, group_id):
-        """获取群组共享的Redis键"""
-        return f"{self._get_today_key()}:group:{group_id}"
+        """获取群组共享的Redis键（代理方法）"""
+        return self.redis_keys.get_group_key(group_id)
 
     def _get_reset_period_date(self):
-        """获取考虑自定义重置时间的日期字符串"""
-        # 获取配置的重置时间
-        reset_time_str = self.config["limits"].get("daily_reset_time", "00:00")
-
-        # 解析重置时间
-        try:
-            reset_hour, reset_minute = map(int, reset_time_str.split(":"))
-            if not (0 <= reset_hour <= 23 and 0 <= reset_minute <= 59):
-                raise ValueError("重置时间格式错误")
-        except (ValueError, AttributeError):
-            # 如果配置格式错误，使用默认的00:00
-            reset_hour, reset_minute = 0, 0
-            self._log_warning(
-                "重置时间配置格式错误: {}，使用默认值00:00", reset_time_str
-            )
-
-        now = datetime.datetime.now()
-
-        # 如果当前时间还没到重置时间，那么属于"昨天"的统计周期
-        # 如果当前时间已经到了或超过重置时间，那么属于"今天"的统计周期
-        current_reset_time = now.replace(
-            hour=reset_hour, minute=reset_minute, second=0, microsecond=0
-        )
-
-        if now >= current_reset_time:
-            # 当前时间已到达或超过重置时间，使用今天的日期
-            return now.strftime("%Y-%m-%d")
-        else:
-            # 当前时间还没到重置时间，使用昨天的日期
-            yesterday = now - datetime.timedelta(days=1)
-            return yesterday.strftime("%Y-%m-%d")
+        """获取考虑自定义重置时间的日期字符串（代理方法）"""
+        return self.redis_keys.get_reset_period_date()
 
     def _get_usage_record_key(self, user_id, group_id=None, date_str=None):
-        """获取使用记录Redis键"""
-        if date_str is None:
-            # 使用与_today_key相同的逻辑，确保日期一致性
-            date_str = self._get_reset_period_date()
-
-        if group_id is None:
-            group_id = "private_chat"
-
-        return f"astrbot:usage_record:{date_str}:{group_id}:{user_id}"
+        """获取使用记录Redis键（代理方法）"""
+        return self.redis_keys.get_usage_record_key(user_id, group_id, date_str)
 
     def _get_usage_stats_key(self, date_str=None):
-        """获取使用统计Redis键"""
-        if date_str is None:
-            # 使用与_today_key相同的逻辑，确保日期一致性
-            date_str = self._get_reset_period_date()
-
-        return f"astrbot:usage_stats:{date_str}"
+        """获取使用统计Redis键（代理方法）"""
+        return self.redis_keys.get_usage_stats_key(date_str)
 
     def _get_trend_stats_key(self, period_type, period_value):
-        """获取趋势统计Redis键
-
-        参数：
-            period_type: 统计周期类型 ('daily', 'weekly', 'monthly')
-            period_value: 周期值 (日期字符串、周数、月份)
-        """
-        return f"astrbot:trend_stats:{period_type}:{period_value}"
+        """获取趋势统计Redis键（代理方法）"""
+        return self.redis_keys.get_trend_stats_key(period_type, period_value)
 
     def _get_week_number(self, date_obj=None):
-        """获取日期对应的周数"""
-        if date_obj is None:
-            date_obj = datetime.datetime.now()
-        return date_obj.isocalendar()[1]  # 返回周数
+        """获取日期对应的周数（代理方法）"""
+        return self.redis_keys.get_week_number(date_obj)
 
     def _get_month_key(self, date_obj=None):
-        """获取月份键（格式：YYYY-MM）"""
-        if date_obj is None:
-            date_obj = datetime.datetime.now()
-        return date_obj.strftime("%Y-%m")
+        """获取月份键（代理方法）"""
+        return self.redis_keys.get_month_key(date_obj)
 
     def _get_hour_key(self, date_obj=None):
-        """获取小时键（格式：YYYY-MM-DD-HH）"""
-        if date_obj is None:
-            date_obj = datetime.datetime.now()
-        return date_obj.strftime("%Y-%m-%d-%H")
+        """获取小时键（代理方法）"""
+        return self.redis_keys.get_hour_key(date_obj)
+
+    def _get_seconds_until_tomorrow(self):
+        """获取到下次重置时间的秒数（代理方法）"""
+        return self.redis_keys.get_seconds_until_tomorrow()
 
     def _record_trend_data(self, user_id, group_id=None, usage_type="llm_request"):
         """记录趋势分析数据
@@ -1767,38 +1444,6 @@ class DailyLimitPlugin(star.Star):
             if self.redis.exists(key):
                 self.redis.expire(key, seconds_until_tomorrow)
 
-    def _get_seconds_until_tomorrow(self):
-        """获取到下次重置时间的秒数"""
-        # 获取配置的重置时间
-        reset_time_str = self.config["limits"].get("daily_reset_time", "00:00")
-
-        # 解析重置时间
-        try:
-            reset_hour, reset_minute = map(int, reset_time_str.split(":"))
-            if not (0 <= reset_hour <= 23 and 0 <= reset_minute <= 59):
-                raise ValueError("重置时间格式错误")
-        except (ValueError, AttributeError):
-            # 如果配置格式错误，使用默认的00:00
-            reset_hour, reset_minute = 0, 0
-            self._log_warning(
-                "重置时间配置格式错误: {}，使用默认值00:00", reset_time_str
-            )
-
-        now = datetime.datetime.now()
-
-        # 计算今天的重置时间
-        reset_today = now.replace(
-            hour=reset_hour, minute=reset_minute, second=0, microsecond=0
-        )
-
-        # 如果当前时间已经过了今天的重置时间，则计算明天的重置时间
-        if now >= reset_today:
-            reset_time = reset_today + datetime.timedelta(days=1)
-        else:
-            reset_time = reset_today
-
-        return int((reset_time - now).total_seconds())
-
     def _should_process_request(
         self, event: AstrMessageEvent, req: ProviderRequest
     ) -> bool:
@@ -2245,190 +1890,36 @@ class DailyLimitPlugin(star.Star):
         pass
 
     def _get_default_messages(self) -> dict:
-        """获取默认消息配置"""
-        return {
-            "zero_usage_message": "您的AI访问次数已达上限（{usage}/{limit}），请稍后再试或联系管理员提升限额。",
-            "zero_usage_group_shared_message": "本群组AI访问次数已达上限（{usage}/{limit}），请稍后再试或联系管理员提升限额。",
-            "zero_usage_group_individual_message": "您在本群组的AI访问次数已达上限（{usage}/{limit}），请稍后再试或联系管理员提升限额。",
-            "limit_status_private_message": "👤 个人使用状态\n📊 今日已使用：{usage}/{limit} 次\n📈 {progress_bar}\n🎯 剩余次数：{remaining} 次\n\n💡 使用提示：{usage_tip}\n🔄 每日重置时间：{reset_time}",
-            "limit_status_group_shared_message": "👥 群组共享模式 - {limit_type}\n📊 今日已使用：{usage}/{limit} 次\n📈 {progress_bar}\n🎯 剩余次数：{remaining} 次\n\n💡 使用提示：{usage_tip}\n🔄 每日重置时间：{reset_time}",
-            "limit_status_group_individual_message": "👤 个人独立模式 - {limit_type}\n📊 今日已使用：{usage}/{limit} 次\n📈 {progress_bar}\n🎯 剩余次数：{remaining} 次\n\n💡 使用提示：{usage_tip}\n🔄 每日重置时间：{reset_time}",
-            "limit_status_exempt_message": "🎉 您{group_context}没有调用次数限制（豁免用户）",
-            "limit_status_time_period_message": "\n\n⏰ 当前处于时间段限制：{start_time}-{end_time}\n📋 时间段限制：{time_period_limit} 次\n📊 时间段内已使用：{time_period_usage}/{time_period_limit} 次\n📈 {time_period_progress}\n🎯 时间段内剩余：{time_period_remaining} 次",
-        }
+        """获取默认消息配置（代理方法）"""
+        return self.messages_handler.get_default_messages()
 
     def _get_valid_message_types(self) -> list:
-        """获取有效的消息类型列表"""
-        return [
-            "zero_usage_message",
-            "zero_usage_group_shared_message",
-            "zero_usage_group_individual_message",
-            "limit_status_private_message",
-            "limit_status_group_shared_message",
-            "limit_status_group_individual_message",
-            "limit_status_exempt_message",
-            "limit_status_time_period_message",
-        ]
+        """获取有效的消息类型列表（代理方法）"""
+        return self.messages_handler.get_valid_message_types()
 
     def _validate_message_content(self, msg_type: str, msg_content: str) -> bool:
-        """验证消息内容格式"""
-        if msg_type.startswith("zero_usage") and (
-            "{usage}" not in msg_content or "{limit}" not in msg_content
-        ):
-            return False
-        return True
+        """验证消息内容格式（代理方法）"""
+        return self.messages_handler.validate_message_content(msg_type, msg_content)
 
     async def _handle_messages_help(self, event: AstrMessageEvent) -> None:
-        """处理消息配置帮助命令"""
-        custom_messages = self.config["limits"].get("custom_messages", {})
-
-        help_msg = "📝 自定义提醒消息配置\n"
-        help_msg += "═══════════════════\n\n"
-
-        # 显示当前配置
-        if custom_messages:
-            help_msg += "当前配置：\n"
-            for msg_type, msg_content in custom_messages.items():
-                help_msg += f"• {msg_type}: {msg_content}\n"
-            help_msg += "\n"
-        else:
-            help_msg += "当前使用默认消息配置\n\n"
-
-        help_msg += "使用方式：\n"
-        help_msg += "/limit messages list - 查看当前消息配置\n"
-        help_msg += "/limit messages set <类型> <消息内容> - 设置自定义消息\n"
-        help_msg += "/limit messages reset <类型> - 重置指定类型的消息为默认值\n"
-        help_msg += "/limit messages reset_all - 重置所有消息为默认值\n\n"
-
-        help_msg += "可用消息类型：\n"
-        help_msg += "• zero_usage_message - 私聊使用次数为0时的消息\n"
-        help_msg += (
-            "• zero_usage_group_shared_message - 群组共享模式使用次数为0时的消息\n"
-        )
-        help_msg += (
-            "• zero_usage_group_individual_message - 群组独立模式使用次数为0时的消息\n"
-        )
-        help_msg += "• limit_status_private_message - /limit_status 私聊状态消息\n"
-        help_msg += (
-            "• limit_status_group_shared_message - /limit_status 群组共享模式状态消息\n"
-        )
-        help_msg += "• limit_status_group_individual_message - /limit_status 群组独立模式状态消息\n"
-        help_msg += "• limit_status_exempt_message - /limit_status 豁免用户状态消息\n"
-        help_msg += (
-            "• limit_status_time_period_message - /limit_status 时间段限制状态消息\n\n"
-        )
-
-        help_msg += "支持变量：\n"
-        help_msg += "• {usage} - 已使用次数\n"
-        help_msg += "• {limit} - 限制次数\n"
-        help_msg += "• {remaining} - 剩余次数\n"
-        help_msg += "• {user_name} - 用户名\n"
-        help_msg += "• {group_name} - 群组名\n"
-        help_msg += "• {progress_bar} - 进度条\n"
-        help_msg += "• {usage_tip} - 使用提示\n"
-        help_msg += "• {reset_time} - 重置时间\n"
-        help_msg += "• {limit_type} - 限制类型（特定/默认/群组）\n"
-        help_msg += "• {group_context} - 群组上下文\n"
-        help_msg += "• {start_time} - 时间段开始时间\n"
-        help_msg += "• {end_time} - 时间段结束时间\n"
-        help_msg += "• {time_period_limit} - 时间段限制次数\n"
-        help_msg += "• {time_period_usage} - 时间段内已使用次数\n"
-        help_msg += "• {time_period_progress} - 时间段进度条\n"
-        help_msg += "• {time_period_remaining} - 时间段内剩余次数"
-
-        event.set_result(MessageEventResult().message(help_msg))
+        """处理消息配置帮助命令（代理方法）"""
+        await self.messages_handler.handle_messages_help(event)
 
     async def _handle_messages_list(self, event: AstrMessageEvent) -> None:
-        """处理消息列表命令"""
-        custom_messages = self.config["limits"].get("custom_messages", {})
-
-        if not custom_messages:
-            event.set_result(MessageEventResult().message("当前使用默认消息配置"))
-            return
-
-        msg_list = "📝 当前自定义消息配置：\n"
-        msg_list += "═══════════════════\n\n"
-
-        for msg_type, msg_content in custom_messages.items():
-            msg_list += f"🔹 {msg_type}:\n"
-            msg_list += f"   {msg_content}\n\n"
-
-        event.set_result(MessageEventResult().message(msg_list))
+        """处理消息列表命令（代理方法）"""
+        await self.messages_handler.handle_messages_list(event)
 
     async def _handle_messages_set(self, event: AstrMessageEvent, args: list) -> None:
-        """处理消息设置命令"""
-        msg_type = args[3]
-        msg_content = " ".join(args[4:])
-
-        valid_types = self._get_valid_message_types()
-        if msg_type not in valid_types:
-            event.set_result(
-                MessageEventResult().message(
-                    f"无效的消息类型，可用类型：{', '.join(valid_types)}"
-                )
-            )
-            return
-
-        if not self._validate_message_content(msg_type, msg_content):
-            event.set_result(
-                MessageEventResult().message(
-                    "zero_usage消息类型必须包含 {usage} 和 {limit} 变量"
-                )
-            )
-            return
-
-        # 保存自定义消息配置
-        if "custom_messages" not in self.config["limits"]:
-            self.config["limits"]["custom_messages"] = {}
-
-        self.config["limits"]["custom_messages"][msg_type] = msg_content
-        self.config.save_config()
-
-        event.set_result(
-            MessageEventResult().message(
-                f"✅ 已设置 {msg_type} 的自定义消息\n\n新消息内容：\n{msg_content}"
-            )
-        )
+        """处理消息设置命令（代理方法）"""
+        await self.messages_handler.handle_messages_set(event, args)
 
     async def _handle_messages_reset(self, event: AstrMessageEvent, args: list) -> None:
-        """处理消息重置命令"""
-        msg_type = args[3]
-
-        valid_types = self._get_valid_message_types()
-        if msg_type not in valid_types:
-            event.set_result(
-                MessageEventResult().message(
-                    f"无效的消息类型，可用类型：{', '.join(valid_types)}"
-                )
-            )
-            return
-
-        default_messages = self._get_default_messages()
-
-        # 如果存在自定义配置，则删除该类型
-        if (
-            "custom_messages" in self.config["limits"]
-            and msg_type in self.config["limits"]["custom_messages"]
-        ):
-            del self.config["limits"]["custom_messages"][msg_type]
-            # 如果自定义配置为空，则删除整个配置节
-            if not self.config["limits"]["custom_messages"]:
-                del self.config["limits"]["custom_messages"]
-            self.config.save_config()
-
-        event.set_result(
-            MessageEventResult().message(
-                f"✅ 已重置 {msg_type} 为默认消息\n\n默认消息内容：\n{default_messages[msg_type]}"
-            )
-        )
+        """处理消息重置命令（代理方法）"""
+        await self.messages_handler.handle_messages_reset(event, args)
 
     async def _handle_messages_reset_all(self, event: AstrMessageEvent) -> None:
-        """处理重置所有消息命令"""
-        if "custom_messages" in self.config["limits"]:
-            del self.config["limits"]["custom_messages"]
-            self.config.save_config()
-
-        event.set_result(MessageEventResult().message("✅ 已重置所有消息为默认值"))
+        """处理重置所有消息命令（代理方法）"""
+        await self.messages_handler.handle_messages_reset_all(event)
 
     @filter.permission_type(PermissionType.ADMIN)
     @limit_command_group.command("messages")
@@ -2822,243 +2313,32 @@ class DailyLimitPlugin(star.Star):
             )
 
     async def _handle_security_status(self, event: AstrMessageEvent):
-        """处理安全状态查询"""
-        try:
-            status_msg = "🛡️ 防刷机制状态\n"
-            status_msg += "══════════\n\n"
-
-            # 防刷机制状态
-            status_msg += f"• 防刷机制：{'✅ 已启用' if self.anti_abuse_enabled else '❌ 未启用'}\n"
-
-            # 统计信息
-            blocked_count = len(self.blocked_users)
-            monitored_count = len(self.abuse_records)
-
-            status_msg += f"• 当前被限制用户：{blocked_count} 个\n"
-            status_msg += f"• 监控中用户：{monitored_count} 个\n"
-
-            # 异常检测统计
-            total_abuse_detections = sum(
-                len(records) for records in self.abuse_records.values()
-            )
-            status_msg += f"• 累计异常检测：{total_abuse_detections} 次\n"
-
-            # 配置信息
-            status_msg += "\n📊 检测阈值配置：\n"
-            status_msg += f"• 快速请求：{self.rapid_request_threshold}次/{self.rapid_request_window}秒\n"
-            status_msg += f"• 连续请求：{self.consecutive_request_threshold}次/{self.consecutive_request_window}秒\n"
-            status_msg += f"• 自动限制时长：{self.auto_block_duration}秒\n"
-
-            event.set_result(MessageEventResult().message(status_msg))
-
-        except Exception as e:
-            self._log_error("查询安全状态失败: {}", str(e))
-            event.set_result(MessageEventResult().message("❌ 查询安全状态失败"))
+        """处理安全状态查询（代理方法）"""
+        await self.security_handler.handle_security_status(event)
 
     async def _handle_security_enable(self, event: AstrMessageEvent):
-        """启用防刷机制"""
-        try:
-            if self.anti_abuse_enabled:
-                event.set_result(MessageEventResult().message("✅ 防刷机制已经启用"))
-                return
-
-            # 启用防刷机制
-            self.config["security"]["anti_abuse_enabled"] = True
-            self.config.save_config()
-            self.anti_abuse_enabled = True
-
-            event.set_result(MessageEventResult().message("✅ 防刷机制已启用"))
-
-        except Exception as e:
-            self._log_error("启用防刷机制失败: {}", str(e))
-            event.set_result(MessageEventResult().message("❌ 启用防刷机制失败"))
+        """启用防刷机制（代理方法）"""
+        await self.security_handler.handle_security_enable(event)
 
     async def _handle_security_disable(self, event: AstrMessageEvent):
-        """禁用防刷机制"""
-        try:
-            if not self.anti_abuse_enabled:
-                event.set_result(MessageEventResult().message("✅ 防刷机制已经禁用"))
-                return
-
-            # 禁用防刷机制
-            self.config["security"]["anti_abuse_enabled"] = False
-            self.config.save_config()
-            self.anti_abuse_enabled = False
-
-            # 清除所有限制记录
-            self.blocked_users.clear()
-            self.abuse_records.clear()
-            self.abuse_stats.clear()
-
-            event.set_result(
-                MessageEventResult().message("✅ 防刷机制已禁用，所有限制记录已清除")
-            )
-
-        except Exception as e:
-            self._log_error("禁用防刷机制失败: {}", str(e))
-            event.set_result(MessageEventResult().message("❌ 禁用防刷机制失败"))
+        """禁用防刷机制（代理方法）"""
+        await self.security_handler.handle_security_disable(event)
 
     async def _handle_security_config(self, event: AstrMessageEvent):
-        """查看安全配置"""
-        try:
-            config_msg = "⚙️ 当前安全配置\n"
-            config_msg += "══════════\n\n"
-
-            config_msg += f"• 防刷机制：{'✅ 已启用' if self.anti_abuse_enabled else '❌ 未启用'}\n"
-            config_msg += f"• 快速请求阈值：{self.rapid_request_threshold}次/{self.rapid_request_window}秒\n"
-            config_msg += f"• 连续请求阈值：{self.consecutive_request_threshold}次/{self.consecutive_request_window}秒\n"
-            config_msg += f"• 自动限制时长：{self.auto_block_duration}秒\n"
-            config_msg += f"• 管理员通知：{'✅ 已启用' if self.admin_notification_enabled else '❌ 未启用'}\n"
-            config_msg += f"• 管理员用户数：{len(self.admin_users)} 个\n"
-
-            # 显示通知模板（截取前50字符）
-            template_preview = self.block_notification_template[:50]
-            if len(self.block_notification_template) > 50:
-                template_preview += "..."
-            config_msg += f"• 限制通知模板：{template_preview}\n"
-
-            config_msg += "\n💡 配置说明：\n"
-            config_msg += "• 快速请求：检测短时间内的大量请求\n"
-            config_msg += "• 连续请求：检测连续不间断的请求\n"
-            config_msg += "• 自动限制：检测到异常后自动限制用户\n"
-
-            event.set_result(MessageEventResult().message(config_msg))
-
-        except Exception as e:
-            self._log_error("查看安全配置失败: {}", str(e))
-            event.set_result(MessageEventResult().message("❌ 查看安全配置失败"))
+        """查看安全配置（代理方法）"""
+        await self.security_handler.handle_security_config(event)
 
     async def _handle_security_blocklist(self, event: AstrMessageEvent):
-        """查看被限制用户列表"""
-        try:
-            if not self.blocked_users:
-                event.set_result(
-                    MessageEventResult().message("📋 当前没有被限制的用户")
-                )
-                return
-
-            blocklist_msg = "🚫 被限制用户列表\n"
-            blocklist_msg += "═══════════\n\n"
-
-            current_time = time.time()
-            for user_id, block_info in self.blocked_users.items():
-                remaining_time = max(0, block_info["block_until"] - current_time)
-                minutes = int(remaining_time // 60)
-                seconds = int(remaining_time % 60)
-
-                blocklist_msg += f"• 用户 {user_id}\n"
-                blocklist_msg += f"  原因：{block_info['reason']}\n"
-                blocklist_msg += f"  剩余时间：{minutes}分{seconds}秒\n"
-                blocklist_msg += f"  限制时长：{block_info['duration']}秒\n\n"
-
-            event.set_result(MessageEventResult().message(blocklist_msg))
-
-        except Exception as e:
-            self._log_error("查看限制列表失败: {}", str(e))
-            event.set_result(MessageEventResult().message("❌ 查看限制列表失败"))
+        """查看被限制用户列表（代理方法）"""
+        await self.security_handler.handle_security_blocklist(event)
 
     async def _handle_security_unblock(self, event: AstrMessageEvent, user_id: str):
-        """解除用户限制"""
-        try:
-            user_id = str(user_id)
-
-            if user_id not in self.blocked_users:
-                event.set_result(
-                    MessageEventResult().message(f"✅ 用户 {user_id} 没有被限制")
-                )
-                return
-
-            # 解除限制
-            del self.blocked_users[user_id]
-
-            # 清除异常记录
-            if user_id in self.abuse_records:
-                del self.abuse_records[user_id]
-            if user_id in self.abuse_stats:
-                del self.abuse_stats[user_id]
-
-            event.set_result(
-                MessageEventResult().message(f"✅ 已解除用户 {user_id} 的限制")
-            )
-
-        except Exception as e:
-            self._log_error("解除用户限制失败: {}", str(e))
-            event.set_result(MessageEventResult().message("❌ 解除用户限制失败"))
+        """解除用户限制（代理方法）"""
+        await self.security_handler.handle_security_unblock(event, user_id)
 
     async def _handle_security_stats(self, event: AstrMessageEvent, user_id: str):
-        """查看用户异常行为统计"""
-        try:
-            user_id = str(user_id)
-
-            stats_msg = f"📊 用户 {user_id} 异常行为统计\n"
-            stats_msg += "═════════════\n\n"
-
-            # 检查是否被限制
-            if user_id in self.blocked_users:
-                block_info = self.blocked_users[user_id]
-                remaining_time = max(0, block_info["block_until"] - time.time())
-                minutes = int(remaining_time // 60)
-                seconds = int(remaining_time % 60)
-
-                stats_msg += "🚫 当前状态：被限制\n"
-                stats_msg += f"• 限制原因：{block_info['reason']}\n"
-                stats_msg += f"• 剩余限制时间：{minutes}分{seconds}秒\n"
-                stats_msg += f"• 限制开始时间：{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(block_info['blocked_at']))}\n\n"
-            else:
-                stats_msg += "✅ 当前状态：正常\n\n"
-
-            # 异常记录统计
-            if user_id in self.abuse_records:
-                records = self.abuse_records[user_id]
-                current_time = time.time()
-
-                # 最近1小时内的记录
-                recent_records = [t for t in records if t > current_time - 3600]
-
-                stats_msg += "📈 最近1小时请求统计：\n"
-                stats_msg += f"• 总请求次数：{len(recent_records)} 次\n"
-
-                if recent_records:
-                    # 计算请求频率
-                    time_range = (
-                        max(recent_records) - min(recent_records)
-                        if len(recent_records) > 1
-                        else 1
-                    )
-                    frequency = len(recent_records) / max(time_range, 1)
-                    stats_msg += f"• 平均频率：{frequency:.2f} 次/秒\n"
-
-                    # 最近请求时间
-                    last_request = max(recent_records)
-                    time_since_last = current_time - last_request
-                    stats_msg += f"• 最后请求：{int(time_since_last)} 秒前\n"
-
-                # 异常检测统计
-                if user_id in self.abuse_stats:
-                    user_stats = self.abuse_stats[user_id]
-                    stats_msg += "\n⚠️ 异常检测统计：\n"
-                    stats_msg += (
-                        f"• 连续请求计数：{user_stats['consecutive_count']} 次\n"
-                    )
-                    stats_msg += f"• 最后请求时间：{time.strftime('%H:%M:%S', time.localtime(user_stats['last_request_time']))}\n"
-
-            else:
-                stats_msg += "📊 该用户暂无异常行为记录\n"
-
-            event.set_result(MessageEventResult().message(stats_msg))
-
-        except Exception as e:
-            self._log_error("查看用户统计失败: {}", str(e))
-            event.set_result(MessageEventResult().message("❌ 查看用户统计失败"))
-            self.config.save_config()
-
-            event.set_result(
-                MessageEventResult().message(f"已将用户 {user_id} 添加到豁免列表")
-            )
-        else:
-            event.set_result(
-                MessageEventResult().message(f"用户 {user_id} 已在豁免列表中")
-            )
+        """查看用户异常行为统计（代理方法）"""
+        await self.security_handler.handle_security_stats(event, user_id)
 
     @filter.permission_type(PermissionType.ADMIN)
     @limit_command_group.command("unexempt")
@@ -3938,85 +3218,52 @@ class DailyLimitPlugin(star.Star):
 
         停止Web服务器并清理所有相关资源，确保状态正确清理。
         """
-        # 记录终止前的Web服务器状态
-        web_server_status = self.get_web_server_status()
-
         # 停止Web服务器
         if self.web_server:
             try:
                 self._log_info("正在停止Web服务器...")
-
-                # 记录停止前的状态
-                previous_status = self.web_server.get_status()
-
-                # 停止Web服务器
                 success = self.web_server.stop()
 
                 if success:
                     self._log_info("Web服务器已停止")
-                    # 记录停止后的状态
-                    final_status = self.web_server.get_status()
-                    self._log_info("Web服务器终止状态: {}", final_status)
                 else:
                     self._log_warning("Web服务器停止失败")
 
             except Exception as e:
-                error_msg = f"停止Web服务器失败: {str(e)}"
-                self._log_error(error_msg)
+                self._log_error("停止Web服务器失败: {}", str(e))
 
         # 清理Web服务器线程
         if self.web_server_thread and self.web_server_thread.is_alive():
             try:
-                self._log_info("等待Web服务器线程结束...")
-                self.web_server_thread.join(timeout=3)  # 最多等待3秒
+                self.web_server_thread.join(timeout=3)
                 if self.web_server_thread.is_alive():
                     self._log_warning("Web服务器线程未在3秒内结束")
-                else:
-                    self._log_info("Web服务器线程已结束")
             except Exception as e:
-                error_msg = f"等待Web服务器线程结束时出错: {str(e)}"
-                self._log_error(error_msg)
+                self._log_error("等待Web服务器线程结束时出错: {}", str(e))
 
         # 清理Web服务器实例和线程引用
         self.web_server = None
         self.web_server_thread = None
 
+        # 停止版本检查任务
+        if self.version_check_task and not self.version_check_task.done():
+            self.version_check_task.cancel()
+            try:
+                await self.version_check_task
+            except asyncio.CancelledError:
+                pass
+            self._log_info("版本检查任务已停止")
+
         self._log_info("日调用限制插件已终止")
 
     def _terminate_web_server(self):
         """
-        专门用于停止Web服务器的方法
+        专门用于停止Web服务器的方法（代理方法）
 
         返回：
             bool: 停止成功返回True，失败返回False
         """
-        if not self._is_web_server_running():
-            self._log_info("Web服务器未运行，无需停止")
-            return True
-
-        try:
-            self._log_info("正在停止Web服务器...")
-
-            # 记录停止前的状态
-            previous_status = self.get_web_server_status()
-
-            # 停止Web服务器
-            success = self.web_server.stop()
-
-            if success:
-                self._log_info("Web服务器已停止")
-                # 清理引用
-                self.web_server = None
-                self.web_server_thread = None
-                return True
-            else:
-                self._log_warning("Web服务器停止失败")
-                return False
-
-        except Exception as e:
-            error_msg = f"停止Web服务器失败: {str(e)}"
-            self._log_error(error_msg)
-            return False
+        return self.web_manager.terminate_web_server()
 
     @filter.permission_type(PermissionType.ADMIN)
     @limit_command_group.command("timeperiod list")
@@ -4338,38 +3585,3 @@ class DailyLimitPlugin(star.Star):
     async def on_astrbot_loaded(self):
         """AstrBot初始化完成时触发"""
         self._log_info("{}", self.ASCII_ART)
-
-    async def terminate(self):
-        """插件终止时清理资源"""
-        try:
-            # 停止Web服务器
-            if hasattr(self, "web_server") and self.web_server:
-                self._log_info("正在停止Web服务器...")
-                try:
-                    # 显式停止Web服务器
-                    stop_result = self.web_server.stop()
-                    if stop_result:
-                        self._log_info("Web服务器已成功停止")
-                    else:
-                        self._log_warning("Web服务器停止可能未完全成功")
-                except Exception as e:
-                    self._log_error("停止Web服务器时发生错误: {}", str(e))
-
-                # 清理Web服务器引用
-                self.web_server = None
-                self.web_server_thread = None
-
-            # 停止版本检查任务
-            if self.version_check_task and not self.version_check_task.done():
-                self.version_check_task.cancel()
-                try:
-                    await self.version_check_task
-                except asyncio.CancelledError:
-                    pass
-                self._log_info("版本检查任务已停止")
-
-        except Exception as e:
-            self._handle_error(e, "停止版本检查任务")
-
-        # 调用父类的terminate方法
-        await super().terminate()
