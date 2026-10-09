@@ -310,8 +310,7 @@ class UsageTracker:
 
     def _get_reset_period_date(self):
         """获取重置周期的日期字符串"""
-        # 这个方法需要在 main.py 中实现
-        return datetime.datetime.now().strftime("%Y-%m-%d")
+        return self.plugin.redis_keys.get_reset_period_date()
 
     def _get_reset_time(self):
         """获取重置时间"""
@@ -321,10 +320,8 @@ class UsageTracker:
         return datetime.time(hour=hour, minute=minute)
 
     def _get_seconds_until_tomorrow(self):
-        """获取距离明天的秒数"""
-        now = datetime.datetime.now()
-        tomorrow = now.replace(hour=0, minute=0, second=0, microsecond=0) + datetime.timedelta(days=1)
-        return int((tomorrow - now).total_seconds())
+        """获取到配置的下一次重置时间的秒数"""
+        return self.plugin.redis_keys.get_seconds_until_reset()
 
     def _set_expiry_for_stats_keys(self, keys_to_update):
         """设置统计键的过期时间"""

@@ -95,7 +95,7 @@ except Exception as e:
     name="daily_limit",
     desc="限制用户每日调用大模型的次数",
     author="left666 & Sakura520222",
-    version="v2.8.9",
+    version="v2.8.10",
     repo="https://github.com/left666/astrbot_plugin_daily_limit",
 )
 class DailyLimitPlugin(star.Star):
@@ -105,6 +105,7 @@ class DailyLimitPlugin(star.Star):
         super().__init__(context)
         self.context = context
         self.config = config
+        self.plugin_version = "v2.8.10"  # Installed version, independent of saved user configuration.
         self.group_limits = {}  # 群组特定限制 {"group_id": limit_count}
         self.user_limits = {}  # 用户特定限制 {"user_id": limit_count}
         self.group_modes = {}  # 群组模式配置 {"group_id": "shared"或"individual"}
@@ -301,7 +302,8 @@ class DailyLimitPlugin(star.Star):
 
     def _validate_daily_reset_time(self):
         """验证每日重置时间配置（代理方法）"""
-        self.config_loader.validate_daily_reset_time()
+        with self.config_loader.lock:
+            self.config_loader.validate_daily_reset_time()
 
     def _detect_abuse_behavior(self, user_id, timestamp=None):
         """检测异常使用行为
@@ -656,119 +658,123 @@ class DailyLimitPlugin(star.Star):
 
     def _validate_daily_reset_time(self):
         """验证每日重置时间配置"""
-        reset_time_str = self.config["limits"].get("daily_reset_time", "00:00")
+        with self.config_loader.lock:
+            reset_time_str = self.config["limits"].get("daily_reset_time", "00:00")
 
-        # 验证重置时间格式
-        try:
-            reset_hour, reset_minute = map(int, reset_time_str.split(":"))
-            if not (0 <= reset_hour <= 23 and 0 <= reset_minute <= 59):
-                raise ValueError("重置时间格式错误")
-            self._log_info("重置时间配置验证通过: {}", reset_time_str)
-        except (ValueError, AttributeError) as e:
-            # 如果配置格式错误，记录警告并使用默认值
-            self._log_warning(
-                "重置时间配置格式错误: {}，错误: {}，使用默认值00:00", reset_time_str, e
-            )
-            # 自动修复为默认值
-            self.config["limits"]["daily_reset_time"] = "00:00"
+            # 验证重置时间格式
             try:
-                self.config.save_config()
-                self._log_info("已自动修复重置时间配置为默认值00:00")
-            except Exception as save_error:
-                self._log_error("保存重置时间配置失败: {}", save_error)
+                reset_hour, reset_minute = map(int, reset_time_str.split(":"))
+                if not (0 <= reset_hour <= 23 and 0 <= reset_minute <= 59):
+                    raise ValueError("重置时间格式错误")
+                self._log_info("重置时间配置验证通过: {}", reset_time_str)
+            except (ValueError, AttributeError) as e:
+                # 如果配置格式错误，记录警告并使用默认值
+                self._log_warning(
+                    "重置时间配置格式错误: {}，错误: {}，使用默认值00:00", reset_time_str, e
+                )
+                # 自动修复为默认值
+                self.config["limits"]["daily_reset_time"] = "00:00"
+                try:
+                    self.config.save_config()
+                    self._log_info("已自动修复重置时间配置为默认值00:00")
+                except Exception as save_error:
+                    self._log_error("保存重置时间配置失败: {}", save_error)
 
     def _save_group_limit(self, group_id, limit):
         """保存群组特定限制到配置文件（新格式：群组ID:限制次数）"""
-        group_id = str(group_id)
+        with self.config_loader.lock:
+            group_id = str(group_id)
 
-        # 获取当前配置文本
-        current_text = self.config["limits"].get("group_limits", "").strip()
-        lines = current_text.split("\n") if current_text else []
+            # 获取当前配置文本
+            current_text = self.config["limits"].get("group_limits", "").strip()
+            lines = current_text.split("\n") if current_text else []
 
-        # 查找并更新现有行，或添加新行
-        updated = False
-        new_lines = []
-        for line in lines:
-            line = line.strip()
-            if line and ":" in line:
-                parts = line.split(":", 1)
-                if len(parts) == 2 and parts[0].strip() == group_id:
-                    # 更新现有行
-                    new_lines.append(f"{group_id}:{limit}")
-                    updated = True
-                else:
-                    # 保留其他行
-                    new_lines.append(line)
+            # 查找并更新现有行，或添加新行
+            updated = False
+            new_lines = []
+            for line in lines:
+                line = line.strip()
+                if line and ":" in line:
+                    parts = line.split(":", 1)
+                    if len(parts) == 2 and parts[0].strip() == group_id:
+                        # 更新现有行
+                        new_lines.append(f"{group_id}:{limit}")
+                        updated = True
+                    else:
+                        # 保留其他行
+                        new_lines.append(line)
 
-        # 如果没有找到现有行，添加新行
-        if not updated:
-            new_lines.append(f"{group_id}:{limit}")
+            # 如果没有找到现有行，添加新行
+            if not updated:
+                new_lines.append(f"{group_id}:{limit}")
 
-        # 更新配置并保存
-        self.config["limits"]["group_limits"] = "\n".join(new_lines)
-        self.config.save_config()
+            # 更新配置并保存
+            self.config["limits"]["group_limits"] = "\n".join(new_lines)
+            self.config.save_config()
 
     def _save_user_limit(self, user_id, limit):
         """保存用户特定限制到配置文件（新格式：用户ID:限制次数）"""
-        user_id = str(user_id)
+        with self.config_loader.lock:
+            user_id = str(user_id)
 
-        # 获取当前配置文本
-        current_text = self.config["limits"].get("user_limits", "").strip()
-        lines = current_text.split("\n") if current_text else []
+            # 获取当前配置文本
+            current_text = self.config["limits"].get("user_limits", "").strip()
+            lines = current_text.split("\n") if current_text else []
 
-        # 查找并更新现有行，或添加新行
-        updated = False
-        new_lines = []
-        for line in lines:
-            line = line.strip()
-            if line and ":" in line:
-                parts = line.split(":", 1)
-                if len(parts) == 2 and parts[0].strip() == user_id:
-                    # 更新现有行
-                    new_lines.append(f"{user_id}:{limit}")
-                    updated = True
-                else:
-                    # 保留其他行
-                    new_lines.append(line)
+            # 查找并更新现有行，或添加新行
+            updated = False
+            new_lines = []
+            for line in lines:
+                line = line.strip()
+                if line and ":" in line:
+                    parts = line.split(":", 1)
+                    if len(parts) == 2 and parts[0].strip() == user_id:
+                        # 更新现有行
+                        new_lines.append(f"{user_id}:{limit}")
+                        updated = True
+                    else:
+                        # 保留其他行
+                        new_lines.append(line)
 
-        # 如果没有找到现有行，添加新行
-        if not updated:
-            new_lines.append(f"{user_id}:{limit}")
+            # 如果没有找到现有行，添加新行
+            if not updated:
+                new_lines.append(f"{user_id}:{limit}")
 
-        # 更新配置并保存
-        self.config["limits"]["user_limits"] = "\n".join(new_lines)
-        self.config.save_config()
+            # 更新配置并保存
+            self.config["limits"]["user_limits"] = "\n".join(new_lines)
+            self.config.save_config()
 
     def _save_group_mode(self, group_id, mode):
         """保存群组模式配置到配置文件（新格式：群组ID:模式）"""
-        group_id = str(group_id)
+        with self.config_loader.lock:
+            group_id = str(group_id)
 
-        # 获取当前配置文本
-        current_text = self.config["limits"].get("group_mode_settings", "").strip()
-        lines = current_text.split("\n") if current_text else []
+            # 获取当前配置文本
+            current_text = self.config["limits"].get("group_mode_settings", "").strip()
+            lines = current_text.split("\n") if current_text else []
 
-        # 查找并更新现有行，或添加新行
-        updated = False
-        new_lines = []
-        for line in lines:
-            line = line.strip()
-            if line and ":" in line:
-                parts = line.split(":", 1)
-                if len(parts) == 2 and parts[0].strip() == group_id:
-                    # 更新现有行
-                    new_lines.append(f"{group_id}:{mode}")
-                    updated = True
-                else:
-                    # 保留其他行
-                    new_lines.append(line)
+            # 查找并更新现有行，或添加新行
+            updated = False
+            new_lines = []
+            for line in lines:
+                line = line.strip()
+                if line and ":" in line:
+                    parts = line.split(":", 1)
+                    if len(parts) == 2 and parts[0].strip() == group_id:
+                        # 更新现有行
+                        new_lines.append(f"{group_id}:{mode}")
+                        updated = True
+                    else:
+                        # 保留其他行
+                        new_lines.append(line)
 
-        # 如果没有找到现有行，添加新行
-        if not updated:
-            new_lines.append(f"{group_id}:{mode}")
+            # 如果没有找到现有行，添加新行
+            if not updated:
+                new_lines.append(f"{group_id}:{mode}")
 
-        # 更新配置并保存
-        self.config["limits"]["group_mode_settings"] = "\n".join(new_lines)
-        self.config.save_config()
+            # 更新配置并保存
+            self.config["limits"]["group_mode_settings"] = "\n".join(new_lines)
+            self.config.save_config()
 
     def _init_redis(self):
         """初始化Redis连接"""
@@ -1476,21 +1482,22 @@ class DailyLimitPlugin(star.Star):
         返回：
             tuple: (使用次数, 限制次数, 使用类型描述)
         """
-        limit = self._get_user_limit(user_id, group_id)
+        with self.config_loader.lock:
+            limit = self._get_user_limit(user_id, group_id)
 
-        if group_id is not None:
-            group_mode = self._get_group_mode(group_id)
-            if group_mode == "shared":
-                usage = self._get_group_usage(group_id)
-                usage_type = "群组共享"
+            if group_id is not None:
+                group_mode = self._get_group_mode(group_id)
+                if group_mode == "shared":
+                    usage = self._get_group_usage(group_id)
+                    usage_type = "群组共享"
+                else:
+                    usage = self._get_user_usage(user_id, group_id)
+                    usage_type = "个人独立"
             else:
                 usage = self._get_user_usage(user_id, group_id)
-                usage_type = "个人独立"
-        else:
-            usage = self._get_user_usage(user_id, group_id)
-            usage_type = "个人"
+                usage_type = "个人"
 
-        return usage, limit, usage_type
+            return usage, limit, usage_type
 
     async def _handle_abuse_detected(
         self, event: AstrMessageEvent, user_id: int, abuse_result: dict
@@ -1707,25 +1714,55 @@ class DailyLimitPlugin(star.Star):
         返回：
             bool: 是否允许继续处理请求
         """
-        # 首先获取用户ID，用于豁免检查
+        # Complete quota reads and writes under the reload lock, without awaiting
+        # a message send while a WebUI worker is waiting to publish configuration.
+        with self.config_loader.lock:
+            decision, details = self._prepare_llm_request(event, req)
+
+        if decision in ("exempt", "skip"):
+            return decision == "exempt"
+        if decision == "abuse":
+            user_id, abuse_result = details
+            await self._handle_abuse_detected(event, user_id, abuse_result)
+            return False
+        user_id, group_id, usage, limit = details
+        if decision == "exceeded":
+            await self._handle_limit_exceeded(event, user_id, group_id, usage, limit)
+            return False
+        remaining = limit - usage
+        if remaining in [1, 3, 5]:
+            await self._send_reminder(event, user_id, group_id, remaining)
+        return True
+
+    def _prepare_llm_request(self, event, req):
+        """Decide and count one request against a complete configuration."""
         user_id = event.get_sender_id()
 
         # 豁免用户检查 - 提前到最前面，确保豁免用户不受任何限制
         if self._is_exempt_user(user_id):
-            return True
+            return "exempt", ()
 
         # 基础检查（_should_process_request 不再调用 stop_event）
         if not self._should_process_request(event, req):
             event.stop_event()
-            return False
+            return "skip", ()
+
+        # Legacy usage helpers turn Redis errors into zero. Validate migration
+        # first so an unmappable counter cannot silently grant a fresh budget.
+        if self.time_period_mgr.get_current_time_period() is not None:
+            try:
+                self.time_period_mgr.ensure_legacy_counts()
+            except Exception as error:  # noqa: BLE001 -- fail closed for every migration/backend error
+                self._log_error("迁移旧时段计数失败，拒绝请求: {}", str(error))
+                event.stop_event()
+                return "skip", ()
 
         # 防刷机制检测（如果启用）
         if self.anti_abuse_enabled:
             abuse_result = self._detect_abuse_behavior(user_id, time.time())
             if abuse_result["is_abuse"]:
                 # 检测到异常使用行为，自动限制用户
-                await self._handle_abuse_detected(event, user_id, abuse_result)
-                return False
+                return "abuse", (user_id, abuse_result)
 
         # 获取群组信息
         group_id = None
@@ -1737,84 +1774,79 @@ class DailyLimitPlugin(star.Star):
 
         # 检查限制
         if usage >= limit:
-            await self._handle_limit_exceeded(event, user_id, group_id, usage, limit)
-            return False
-
-        # 发送提醒
-        remaining = limit - usage
-        if remaining in [1, 3, 5]:
-            await self._send_reminder(event, user_id, group_id, remaining)
+            return "exceeded", (user_id, group_id, usage, limit)
 
         # 增加使用次数
         self._increment_usage(user_id, group_id)
         self._record_usage(user_id, group_id, "llm_request")
 
-        return True
+        return "allow", (user_id, group_id, usage, limit)
 
     @filter.command("limit_status")
     async def limit_status(self, event: AstrMessageEvent):
         """用户查看当前使用状态"""
-        user_id = event.get_sender_id()
-        group_id = (
-            event.get_group_id()
-            if event.get_message_type() == MessageType.GROUP_MESSAGE
-            else None
-        )
-
-        # 检查是否允许普通用户查询使用限制
-        allow_normal_check = self.config["limits"].get(
-            "allow_normal_users_check_limit", True
-        )
-
-        # 如果不允许普通用户查询，检查用户是否是管理员
-        # 注意：这里的管理员检查逻辑是简单示例，实际项目中可能需要更复杂的权限检查
-        if not allow_normal_check:
-            # 这里假设只有在admin_users列表中的用户才能查询
-            if str(user_id) not in self.admin_users:
-                event.set_result(MessageEventResult().message("您没有权限查询使用限制"))
-                return
-
-        # 检查使用状态
-        limit = self._get_user_limit(user_id, group_id)
-        time_period_limit = self.time_period_mgr.get_current_time_period_limit()
-        current_time_str = datetime.datetime.now().strftime("%H:%M")
-
-        # 首先检查用户是否被豁免（优先级最高）
-        if str(user_id) in self.config["limits"]["exempt_users"]:
-            status_msg = self.message_builder.build_exempt_user_status(
-                user_id, group_id, time_period_limit, current_time_str
+        with self.config_loader.lock:
+            user_id = event.get_sender_id()
+            group_id = (
+                event.get_group_id()
+                if event.get_message_type() == MessageType.GROUP_MESSAGE
+                else None
             )
-        else:
-            reset_time = self.message_builder.get_reset_time()
 
-            # 根据群组模式显示正确的状态信息
-            if group_id is not None:
-                group_mode = self._get_group_mode(group_id)
-                if group_mode == "shared":
-                    status_msg = self.message_builder.build_shared_group_status(
-                        user_id, group_id, limit, reset_time
-                    )
-                else:
-                    status_msg = self.message_builder.build_individual_group_status(
-                        user_id, group_id, limit, reset_time
-                    )
+            # 检查是否允许普通用户查询使用限制
+            allow_normal_check = self.config["limits"].get(
+                "allow_normal_users_check_limit", True
+            )
+
+            # 如果不允许普通用户查询，检查用户是否是管理员
+            # 注意：这里的管理员检查逻辑是简单示例，实际项目中可能需要更复杂的权限检查
+            if not allow_normal_check:
+                # 这里假设只有在admin_users列表中的用户才能查询
+                if str(user_id) not in self.admin_users:
+                    event.set_result(MessageEventResult().message("您没有权限查询使用限制"))
+                    return
+
+            # 检查使用状态
+            limit = self._get_user_limit(user_id, group_id)
+            time_period_limit = self.time_period_mgr.get_current_time_period_limit()
+            current_time_str = datetime.datetime.now().strftime("%H:%M")
+
+            # 首先检查用户是否被豁免（优先级最高）
+            if str(user_id) in self.config["limits"]["exempt_users"]:
+                status_msg = self.message_builder.build_exempt_user_status(
+                    user_id, group_id, time_period_limit, current_time_str
+                )
             else:
-                status_msg = self.message_builder.build_private_status(
-                    user_id, group_id, limit, reset_time
+                reset_time = self.message_builder.get_reset_time()
+
+                # 根据群组模式显示正确的状态信息
+                if group_id is not None:
+                    group_mode = self._get_group_mode(group_id)
+                    if group_mode == "shared":
+                        status_msg = self.message_builder.build_shared_group_status(
+                            user_id, group_id, limit, reset_time
+                        )
+                    else:
+                        status_msg = self.message_builder.build_individual_group_status(
+                            user_id, group_id, limit, reset_time
+                        )
+                else:
+                    status_msg = self.message_builder.build_private_status(
+                        user_id, group_id, limit, reset_time
+                    )
+
+                # 添加时间段限制信息
+                status_msg = self.message_builder.add_time_period_info(
+                    status_msg, user_id, group_id, time_period_limit, current_time_str
                 )
 
-            # 添加时间段限制信息
-            status_msg = self.message_builder.add_time_period_info(
-                status_msg, user_id, group_id, time_period_limit, current_time_str
-            )
-
-        event.set_result(MessageEventResult().message(status_msg))
+            event.set_result(MessageEventResult().message(status_msg))
 
     @filter.command("限制帮助")
     async def limit_help_all(self, event: AstrMessageEvent):
         """显示本插件所有指令及其帮助信息"""
         help_msg = (
-            "🚀 日调用限制插件 v2.8.9 - 完整指令帮助\n"
+            "🚀 日调用限制插件 v2.8.10 - 完整指令帮助\n"
             "═════════════════════════\n\n"
             "👤 用户指令（所有人可用）：\n"
             "├── /limit_status - 查看您今日的使用状态和剩余次数\n"
@@ -1878,7 +1910,7 @@ class DailyLimitPlugin(star.Star):
             "• 管理员可使用 /limit help 查看详细管理命令\n"
             "• 时间段限制优先级最高，会覆盖其他限制规则\n"
             "• 默认忽略模式：#、*（可自定义添加）\n\n"
-            "📝 版本信息：v2.8.9 | 作者：left666 | 改进：Sakura520222\n"
+            "📝 版本信息：v2.8.10 | 作者：left666 | 改进：Sakura520222\n"
             "═════════════════════════"
         )
 
@@ -1953,192 +1985,194 @@ class DailyLimitPlugin(star.Star):
     @limit_command_group.command("skip_patterns")
     async def limit_skip_patterns(self, event: AstrMessageEvent):
         """管理忽略模式配置（仅管理员）"""
-        args = event.message_str.strip().split()
+        with self.config_loader.lock:
+            args = event.message_str.strip().split()
 
-        # 检查命令格式：/limit skip_patterns [action] [pattern]
-        if len(args) < 3:
-            # 显示当前忽略模式和帮助信息
-            patterns_str = ", ".join([f'"{pattern}"' for pattern in self.skip_patterns])
-            event.set_result(
-                MessageEventResult().message(
-                    f"当前忽略模式：{patterns_str}\n"
-                    f"使用方式：/limit skip_patterns list - 查看当前模式\n"
-                    f"使用方式：/limit skip_patterns add <模式> - 添加忽略模式\n"
-                    f"使用方式：/limit skip_patterns remove <模式> - 移除忽略模式\n"
-                    f"使用方式：/limit skip_patterns reset - 重置为默认模式"
-                )
-            )
-            return
-
-        action = args[2]
-
-        if action == "list":
-            # 显示当前忽略模式
-            patterns_str = ", ".join([f'"{pattern}"' for pattern in self.skip_patterns])
-            event.set_result(
-                MessageEventResult().message(f"当前忽略模式：{patterns_str}")
-            )
-
-        elif action == "add" and len(args) > 3:
-            # 添加忽略模式
-            pattern = args[3]
-            if pattern in self.skip_patterns:
+            # 检查命令格式：/limit skip_patterns [action] [pattern]
+            if len(args) < 3:
+                # 显示当前忽略模式和帮助信息
+                patterns_str = ", ".join([f'"{pattern}"' for pattern in self.skip_patterns])
                 event.set_result(
-                    MessageEventResult().message(f"忽略模式 '{pattern}' 已存在")
+                    MessageEventResult().message(
+                        f"当前忽略模式：{patterns_str}\n"
+                        f"使用方式：/limit skip_patterns list - 查看当前模式\n"
+                        f"使用方式：/limit skip_patterns add <模式> - 添加忽略模式\n"
+                        f"使用方式：/limit skip_patterns remove <模式> - 移除忽略模式\n"
+                        f"使用方式：/limit skip_patterns reset - 重置为默认模式"
+                    )
                 )
-            else:
-                self.skip_patterns.append(pattern)
+                return
+
+            action = args[2]
+
+            if action == "list":
+                # 显示当前忽略模式
+                patterns_str = ", ".join([f'"{pattern}"' for pattern in self.skip_patterns])
+                event.set_result(
+                    MessageEventResult().message(f"当前忽略模式：{patterns_str}")
+                )
+
+            elif action == "add" and len(args) > 3:
+                # 添加忽略模式
+                pattern = args[3]
+                if pattern in self.skip_patterns:
+                    event.set_result(
+                        MessageEventResult().message(f"忽略模式 '{pattern}' 已存在")
+                    )
+                else:
+                    self.skip_patterns.append(pattern)
+                    # 保存到配置文件
+                    self.config["limits"]["skip_patterns"] = self.skip_patterns
+                    self.config.save_config()
+                    event.set_result(
+                        MessageEventResult().message(f"已添加忽略模式：'{pattern}'")
+                    )
+
+            elif action == "remove" and len(args) > 3:
+                # 移除忽略模式
+                pattern = args[3]
+                if pattern in self.skip_patterns:
+                    self.skip_patterns.remove(pattern)
+                    # 保存到配置文件
+                    self.config["limits"]["skip_patterns"] = self.skip_patterns
+                    self.config.save_config()
+                    event.set_result(
+                        MessageEventResult().message(f"已移除忽略模式：'{pattern}'")
+                    )
+                else:
+                    event.set_result(
+                        MessageEventResult().message(f"忽略模式 '{pattern}' 不存在")
+                    )
+
+            elif action == "reset":
+                # 重置为默认模式
+                self.skip_patterns = ["@所有人", "#"]
                 # 保存到配置文件
                 self.config["limits"]["skip_patterns"] = self.skip_patterns
                 self.config.save_config()
                 event.set_result(
-                    MessageEventResult().message(f"已添加忽略模式：'{pattern}'")
+                    MessageEventResult().message("已重置忽略模式为默认值：'@所有人', '#'")
                 )
 
-        elif action == "remove" and len(args) > 3:
-            # 移除忽略模式
-            pattern = args[3]
-            if pattern in self.skip_patterns:
-                self.skip_patterns.remove(pattern)
-                # 保存到配置文件
-                self.config["limits"]["skip_patterns"] = self.skip_patterns
-                self.config.save_config()
-                event.set_result(
-                    MessageEventResult().message(f"已移除忽略模式：'{pattern}'")
-                )
             else:
                 event.set_result(
-                    MessageEventResult().message(f"忽略模式 '{pattern}' 不存在")
+                    MessageEventResult().message(
+                        "无效的命令格式，请使用 /limit skip_patterns 查看帮助"
+                    )
                 )
-
-        elif action == "reset":
-            # 重置为默认模式
-            self.skip_patterns = ["@所有人", "#"]
-            # 保存到配置文件
-            self.config["limits"]["skip_patterns"] = self.skip_patterns
-            self.config.save_config()
-            event.set_result(
-                MessageEventResult().message("已重置忽略模式为默认值：'@所有人', '#'")
-            )
-
-        else:
-            event.set_result(
-                MessageEventResult().message(
-                    "无效的命令格式，请使用 /limit skip_patterns 查看帮助"
-                )
-            )
 
     @filter.permission_type(PermissionType.ADMIN)
     @limit_command_group.command("resettime")
     async def limit_resettime(self, event: AstrMessageEvent):
         """管理每日重置时间配置（仅管理员）"""
-        args = event.message_str.strip().split()
+        with self.config_loader.lock:
+            args = event.message_str.strip().split()
 
-        # 检查命令格式：/limit resettime [action] [time]
-        if len(args) < 3:
-            # 显示当前重置时间配置和帮助信息
-            current_reset_time = self.config["limits"].get("daily_reset_time", "00:00")
+            # 检查命令格式：/limit resettime [action] [time]
+            if len(args) < 3:
+                # 显示当前重置时间配置和帮助信息
+                current_reset_time = self.config["limits"].get("daily_reset_time", "00:00")
 
-            help_msg = "🕐 每日重置时间配置管理\n"
-            help_msg += "═══════════════════\n\n"
-            help_msg += f"当前重置时间：{current_reset_time}\n\n"
-            help_msg += "使用方式：\n"
-            help_msg += "/limit resettime get - 查看当前重置时间\n"
-            help_msg += "/limit resettime set <时间> - 设置每日重置时间\n"
-            help_msg += "/limit resettime reset - 重置为默认时间（00:00）\n\n"
-            help_msg += "时间格式说明：\n"
-            help_msg += "• 格式：HH:MM（24小时制）\n"
-            help_msg += "• 示例：/limit resettime set 06:00 - 设置为早上6点重置\n"
-            help_msg += (
-                "• 示例：/limit resettime set 23:59 - 设置为晚上11点59分重置\n\n"
-            )
-            help_msg += "💡 功能说明：\n"
-            help_msg += "• 每日重置时间决定了使用次数何时清零\n"
-            help_msg += "• 默认重置时间为凌晨00:00\n"
-            help_msg += "• 设置后，所有用户和群组的使用次数将在指定时间重置\n"
+                help_msg = "🕐 每日重置时间配置管理\n"
+                help_msg += "═══════════════════\n\n"
+                help_msg += f"当前重置时间：{current_reset_time}\n\n"
+                help_msg += "使用方式：\n"
+                help_msg += "/limit resettime get - 查看当前重置时间\n"
+                help_msg += "/limit resettime set <时间> - 设置每日重置时间\n"
+                help_msg += "/limit resettime reset - 重置为默认时间（00:00）\n\n"
+                help_msg += "时间格式说明：\n"
+                help_msg += "• 格式：HH:MM（24小时制）\n"
+                help_msg += "• 示例：/limit resettime set 06:00 - 设置为早上6点重置\n"
+                help_msg += (
+                    "• 示例：/limit resettime set 23:59 - 设置为晚上11点59分重置\n\n"
+                )
+                help_msg += "💡 功能说明：\n"
+                help_msg += "• 每日重置时间决定了使用次数何时清零\n"
+                help_msg += "• 默认重置时间为凌晨00:00\n"
+                help_msg += "• 设置后，所有用户和群组的使用次数将在指定时间重置\n"
 
-            event.set_result(MessageEventResult().message(help_msg))
-            return
+                event.set_result(MessageEventResult().message(help_msg))
+                return
 
-        action = args[2]
+            action = args[2]
 
-        if action == "get":
-            # 查看当前重置时间
-            current_reset_time = self.config["limits"].get("daily_reset_time", "00:00")
-            next_reset_time = self._get_reset_time()
-            seconds_until_reset = self._get_seconds_until_tomorrow()
+            if action == "get":
+                # 查看当前重置时间
+                current_reset_time = self.config["limits"].get("daily_reset_time", "00:00")
+                next_reset_time = self._get_reset_time()
+                seconds_until_reset = self._get_seconds_until_tomorrow()
 
-            # 计算距离下次重置的时间
-            hours_until_reset = seconds_until_reset // 3600
-            minutes_until_reset = (seconds_until_reset % 3600) // 60
+                # 计算距离下次重置的时间
+                hours_until_reset = seconds_until_reset // 3600
+                minutes_until_reset = (seconds_until_reset % 3600) // 60
 
-            status_msg = "🕐 当前重置时间配置\n"
-            status_msg += "═══════════════════\n\n"
-            status_msg += f"• 当前重置时间：{current_reset_time}\n"
-            status_msg += f"• 下次重置时间：{next_reset_time}\n"
-            status_msg += (
-                f"• 距离下次重置：{hours_until_reset}小时{minutes_until_reset}分钟\n"
-            )
+                status_msg = "🕐 当前重置时间配置\n"
+                status_msg += "═══════════════════\n\n"
+                status_msg += f"• 当前重置时间：{current_reset_time}\n"
+                status_msg += f"• 下次重置时间：{next_reset_time}\n"
+                status_msg += (
+                    f"• 距离下次重置：{hours_until_reset}小时{minutes_until_reset}分钟\n"
+                )
 
-            event.set_result(MessageEventResult().message(status_msg))
+                event.set_result(MessageEventResult().message(status_msg))
 
-        elif action == "set" and len(args) > 3:
-            # 设置重置时间
-            new_time = args[3]
+            elif action == "set" and len(args) > 3:
+                # 设置重置时间
+                new_time = args[3]
 
-            # 验证时间格式
-            try:
-                # 使用现有的时间格式验证方法
-                if not self._validate_time_format(new_time):
+                # 验证时间格式
+                try:
+                    # 使用现有的时间格式验证方法
+                    if not self._validate_time_format(new_time):
+                        event.set_result(
+                            MessageEventResult().message(
+                                f"❌ 时间格式错误：{new_time}\n请使用 HH:MM 格式（24小时制）\n示例：06:00、23:59"
+                            )
+                        )
+                        return
+
+                    # 保存配置
+                    self.config["limits"]["daily_reset_time"] = new_time
+                    self.config.save_config()
+
+                    # 重新验证配置
+                    self._validate_daily_reset_time()
+
                     event.set_result(
                         MessageEventResult().message(
-                            f"❌ 时间格式错误：{new_time}\n请使用 HH:MM 格式（24小时制）\n示例：06:00、23:59"
+                            f"✅ 已设置每日重置时间为 {new_time}\n\n下次重置将在 {self._get_reset_time()} 进行"
                         )
                     )
-                    return
 
-                # 保存配置
-                self.config["limits"]["daily_reset_time"] = new_time
-                self.config.save_config()
-
-                # 重新验证配置
-                self._validate_daily_reset_time()
-
-                event.set_result(
-                    MessageEventResult().message(
-                        f"✅ 已设置每日重置时间为 {new_time}\n\n下次重置将在 {self._get_reset_time()} 进行"
+                except Exception as e:
+                    self._log_error("设置重置时间失败: {}", str(e))
+                    event.set_result(
+                        MessageEventResult().message(f"❌ 设置重置时间失败：{str(e)}")
                     )
-                )
 
-            except Exception as e:
-                self._log_error("设置重置时间失败: {}", str(e))
-                event.set_result(
-                    MessageEventResult().message(f"❌ 设置重置时间失败：{str(e)}")
-                )
+            elif action == "reset":
+                # 重置为默认时间
+                if "daily_reset_time" in self.config["limits"]:
+                    del self.config["limits"]["daily_reset_time"]
+                    self.config.save_config()
 
-        elif action == "reset":
-            # 重置为默认时间
-            if "daily_reset_time" in self.config["limits"]:
-                del self.config["limits"]["daily_reset_time"]
-                self.config.save_config()
+                    # 重新验证配置
+                    self._validate_daily_reset_time()
 
-                # 重新验证配置
-                self._validate_daily_reset_time()
+                    event.set_result(
+                        MessageEventResult().message("✅ 已重置每日重置时间为默认值 00:00")
+                    )
+                else:
+                    event.set_result(
+                        MessageEventResult().message("✅ 当前已使用默认重置时间 00:00")
+                    )
 
-                event.set_result(
-                    MessageEventResult().message("✅ 已重置每日重置时间为默认值 00:00")
-                )
             else:
                 event.set_result(
-                    MessageEventResult().message("✅ 当前已使用默认重置时间 00:00")
+                    MessageEventResult().message(
+                        "❌ 无效的命令格式，请使用 /limit resettime 查看帮助"
+                    )
                 )
-
-        else:
-            event.set_result(
-                MessageEventResult().message(
-                    "❌ 无效的命令格式，请使用 /limit resettime 查看帮助"
-                )
-            )
 
     @filter.permission_type(PermissionType.ADMIN)
     @limit_command_group.command("help")
@@ -2152,96 +2186,99 @@ class DailyLimitPlugin(star.Star):
     ):
         """设置特定用户的限制（仅管理员）"""
 
-        if user_id is None or limit is None:
-            event.set_result(
-                MessageEventResult().message("用法: /limit set <用户ID> <次数>")
-            )
-            return
-
-        try:
-            limit = int(limit)
-            if limit < 0:
+        with self.config_loader.lock:
+            if user_id is None or limit is None:
                 event.set_result(
-                    MessageEventResult().message("限制次数必须大于或等于0")
+                    MessageEventResult().message("用法: /limit set <用户ID> <次数>")
                 )
                 return
 
-            self.user_limits[user_id] = limit
-            self._save_user_limit(user_id, limit)
+            try:
+                limit = int(limit)
+                if limit < 0:
+                    event.set_result(
+                        MessageEventResult().message("限制次数必须大于或等于0")
+                    )
+                    return
 
-            event.set_result(
-                MessageEventResult().message(
-                    f"已设置用户 {user_id} 的每日调用限制为 {limit} 次"
+                self.user_limits[user_id] = limit
+                self._save_user_limit(user_id, limit)
+
+                event.set_result(
+                    MessageEventResult().message(
+                        f"已设置用户 {user_id} 的每日调用限制为 {limit} 次"
+                    )
                 )
-            )
-        except ValueError:
-            event.set_result(MessageEventResult().message("限制次数必须为整数"))
+            except ValueError:
+                event.set_result(MessageEventResult().message("限制次数必须为整数"))
 
     @filter.permission_type(PermissionType.ADMIN)
     @limit_command_group.command("setgroup")
     async def limit_setgroup(self, event: AstrMessageEvent, limit: int = None):
         """设置当前群组的限制（仅管理员）"""
 
-        if event.get_message_type() != MessageType.GROUP_MESSAGE:
-            event.set_result(MessageEventResult().message("此命令只能在群聊中使用"))
-            return
+        with self.config_loader.lock:
+            if event.get_message_type() != MessageType.GROUP_MESSAGE:
+                event.set_result(MessageEventResult().message("此命令只能在群聊中使用"))
+                return
 
-        if limit is None:
-            event.set_result(
-                MessageEventResult().message("用法: /limit setgroup <次数>")
-            )
-            return
-
-        try:
-            limit = int(limit)
-            if limit < 0:
+            if limit is None:
                 event.set_result(
-                    MessageEventResult().message("限制次数必须大于或等于0")
+                    MessageEventResult().message("用法: /limit setgroup <次数>")
                 )
                 return
 
-            group_id = event.get_group_id()
-            self.group_limits[group_id] = limit
-            self._save_group_limit(group_id, limit)
+            try:
+                limit = int(limit)
+                if limit < 0:
+                    event.set_result(
+                        MessageEventResult().message("限制次数必须大于或等于0")
+                    )
+                    return
 
-            event.set_result(
-                MessageEventResult().message(
-                    f"已设置当前群组的每日调用限制为 {limit} 次"
+                group_id = event.get_group_id()
+                self.group_limits[group_id] = limit
+                self._save_group_limit(group_id, limit)
+
+                event.set_result(
+                    MessageEventResult().message(
+                        f"已设置当前群组的每日调用限制为 {limit} 次"
+                    )
                 )
-            )
-        except ValueError:
-            event.set_result(MessageEventResult().message("限制次数必须为整数"))
+            except ValueError:
+                event.set_result(MessageEventResult().message("限制次数必须为整数"))
 
     @filter.permission_type(PermissionType.ADMIN)
     @limit_command_group.command("setmode")
     async def limit_setmode(self, event: AstrMessageEvent, mode: str = None):
         """设置当前群组的使用模式（仅管理员）"""
 
-        if event.get_message_type() != MessageType.GROUP_MESSAGE:
-            event.set_result(MessageEventResult().message("此命令只能在群聊中使用"))
-            return
+        with self.config_loader.lock:
+            if event.get_message_type() != MessageType.GROUP_MESSAGE:
+                event.set_result(MessageEventResult().message("此命令只能在群聊中使用"))
+                return
 
-        if mode is None:
-            event.set_result(
-                MessageEventResult().message("用法: /limit setmode <shared|individual>")
-            )
-            return
-
-        if mode not in ["shared", "individual"]:
-            event.set_result(
-                MessageEventResult().message(
-                    "模式必须是 'shared'（共享）或 'individual'（独立）"
+            if mode is None:
+                event.set_result(
+                    MessageEventResult().message("用法: /limit setmode <shared|individual>")
                 )
-            )
-            return
+                return
 
-        group_id = event.get_group_id()
-        self.group_modes[group_id] = mode
-        self._save_group_mode(group_id, mode)
-        mode_text = "共享" if mode == "shared" else "独立"
-        event.set_result(
-            MessageEventResult().message(f"已设置当前群组的使用模式为 {mode_text} 模式")
-        )
+            if mode not in ["shared", "individual"]:
+                event.set_result(
+                    MessageEventResult().message(
+                        "模式必须是 'shared'（共享）或 'individual'（独立）"
+                    )
+                )
+                return
+
+            group_id = event.get_group_id()
+            self.group_modes[group_id] = mode
+            self._save_group_mode(group_id, mode)
+            mode_text = "共享" if mode == "shared" else "独立"
+            event.set_result(
+                MessageEventResult().message(f"已设置当前群组的使用模式为 {mode_text} 模式")
+            )
 
     @filter.permission_type(PermissionType.ADMIN)
     @limit_command_group.command("getmode")
@@ -2264,15 +2301,16 @@ class DailyLimitPlugin(star.Star):
     async def limit_exempt(self, event: AstrMessageEvent, user_id: str = None):
         """将用户添加到豁免列表（仅管理员）"""
 
-        if user_id is None:
-            event.set_result(
-                MessageEventResult().message("用法: /limit exempt <用户ID>")
-            )
-            return
+        with self.config_loader.lock:
+            if user_id is None:
+                event.set_result(
+                    MessageEventResult().message("用法: /limit exempt <用户ID>")
+                )
+                return
 
-        if user_id not in self.config["limits"]["exempt_users"]:
-            self.config["limits"]["exempt_users"].append(user_id)
-            self.config.save_config()
+            if user_id not in self.config["limits"]["exempt_users"]:
+                self.config["limits"]["exempt_users"].append(user_id)
+                self.config.save_config()
 
     @filter.permission_type(PermissionType.ADMIN)
     @limit_command_group.command("security")
@@ -2345,71 +2383,74 @@ class DailyLimitPlugin(star.Star):
     async def limit_unexempt(self, event: AstrMessageEvent, user_id: str = None):
         """将用户从豁免列表移除（仅管理员）"""
 
-        if user_id is None:
-            event.set_result(
-                MessageEventResult().message("用法: /limit unexempt <用户ID>")
-            )
-            return
+        with self.config_loader.lock:
+            if user_id is None:
+                event.set_result(
+                    MessageEventResult().message("用法: /limit unexempt <用户ID>")
+                )
+                return
 
-        if user_id in self.config["limits"]["exempt_users"]:
-            self.config["limits"]["exempt_users"].remove(user_id)
-            self.config.save_config()
+            if user_id in self.config["limits"]["exempt_users"]:
+                self.config["limits"]["exempt_users"].remove(user_id)
+                self.config.save_config()
 
-            event.set_result(
-                MessageEventResult().message(f"已将用户 {user_id} 从豁免列表移除")
-            )
-        else:
-            event.set_result(
-                MessageEventResult().message(f"用户 {user_id} 不在豁免列表中")
-            )
+                event.set_result(
+                    MessageEventResult().message(f"已将用户 {user_id} 从豁免列表移除")
+                )
+            else:
+                event.set_result(
+                    MessageEventResult().message(f"用户 {user_id} 不在豁免列表中")
+                )
 
     @filter.permission_type(PermissionType.ADMIN)
     @limit_command_group.command("priority")
     async def limit_priority(self, event: AstrMessageEvent, user_id: str = None):
         """将用户添加到优先级列表（仅管理员）"""
 
-        if user_id is None:
-            event.set_result(
-                MessageEventResult().message("用法: /limit priority <用户ID>")
-            )
-            return
+        with self.config_loader.lock:
+            if user_id is None:
+                event.set_result(
+                    MessageEventResult().message("用法: /limit priority <用户ID>")
+                )
+                return
 
-        if user_id not in self.config["limits"].get("priority_users", []):
-            if "priority_users" not in self.config["limits"]:
-                self.config["limits"]["priority_users"] = []
-            self.config["limits"]["priority_users"].append(user_id)
-            self.config.save_config()
+            if user_id not in self.config["limits"].get("priority_users", []):
+                if "priority_users" not in self.config["limits"]:
+                    self.config["limits"]["priority_users"] = []
+                self.config["limits"]["priority_users"].append(user_id)
+                self.config.save_config()
 
-            event.set_result(
-                MessageEventResult().message(f"已将用户 {user_id} 添加到优先级列表")
-            )
-        else:
-            event.set_result(
-                MessageEventResult().message(f"用户 {user_id} 已在优先级列表中")
-            )
+                event.set_result(
+                    MessageEventResult().message(f"已将用户 {user_id} 添加到优先级列表")
+                )
+            else:
+                event.set_result(
+                    MessageEventResult().message(f"用户 {user_id} 已在优先级列表中")
+                )
 
     @filter.permission_type(PermissionType.ADMIN)
     @limit_command_group.command("unpriority")
     async def limit_unpriority(self, event: AstrMessageEvent, user_id: str = None):
         """将用户从优先级列表移除（仅管理员）"""
 
-        if user_id is None:
-            event.set_result(
-                MessageEventResult().message("用法: /limit unpriority <用户ID>")
-            )
-            return
+        with self.config_loader.lock:
+            if user_id is None:
+                event.set_result(
+                    MessageEventResult().message("用法: /limit unpriority <用户ID>")
+                )
+                return
 
-        if user_id in self.config["limits"].get("priority_users", []):
-            self.config["limits"]["priority_users"].remove(user_id)
-            self.config.save_config()
+            if user_id in self.config["limits"].get("priority_users", []):
+                self.config["limits"]["priority_users"].remove(user_id)
+                self.config.save_config()
 
-            event.set_result(
-                MessageEventResult().message(f"已将用户 {user_id} 从优先级列表移除")
-            )
-        else:
-            event.set_result(
-                MessageEventResult().message(f"用户 {user_id} 不在优先级列表中")
-            )
+                event.set_result(
+                    MessageEventResult().message(f"已将用户 {user_id} 从优先级列表移除")
+                )
+            else:
+                event.set_result(
+                    MessageEventResult().message(f"用户 {user_id} 不在优先级列表中")
+                )
 
     @filter.permission_type(PermissionType.ADMIN)
     @limit_command_group.command("list_exempt")
@@ -3290,118 +3331,124 @@ class DailyLimitPlugin(star.Star):
         limit: int = None,
     ):
         """添加时间段限制（仅管理员）"""
-        if not all([start_time, end_time, limit]):
-            event.set_result(
-                MessageEventResult().message(
-                    "用法: /limit timeperiod add <开始时间> <结束时间> <限制次数>"
-                )
-            )
-            return
-
-        try:
-            # 验证时间格式
-            datetime.datetime.strptime(start_time, "%H:%M")
-            datetime.datetime.strptime(end_time, "%H:%M")
-
-            # 验证限制次数
-            limit = int(limit)
-            if limit < 1:
-                event.set_result(MessageEventResult().message("限制次数必须大于0"))
-                return
-
-            # 添加时间段限制
-            new_period = {
-                "start_time": start_time,
-                "end_time": end_time,
-                "limit": limit,
-                "enabled": True,
-            }
-
-            self.time_period_limits.append(new_period)
-            self._save_time_period_limits()
-
-            event.set_result(
-                MessageEventResult().message(
-                    f"✅ 已添加时间段限制: {start_time} - {end_time}: {limit} 次"
-                )
-            )
-
-        except ValueError as e:
-            if "does not match format" in str(e):
+        with self.config_loader.lock:
+            if not all([start_time, end_time, limit]):
                 event.set_result(
                     MessageEventResult().message(
-                        "时间格式错误，请使用 HH:MM 格式（如 09:00）"
+                        "用法: /limit timeperiod add <开始时间> <结束时间> <限制次数>"
                     )
                 )
-            else:
-                event.set_result(MessageEventResult().message("限制次数必须为整数"))
+                return
+
+            try:
+                # 验证时间格式
+                datetime.datetime.strptime(start_time, "%H:%M")
+                datetime.datetime.strptime(end_time, "%H:%M")
+
+                # 验证限制次数
+                limit = int(limit)
+                if limit < 1:
+                    event.set_result(MessageEventResult().message("限制次数必须大于0"))
+                    return
+
+                # 添加时间段限制
+                new_period = {
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "limit": limit,
+                    "enabled": True,
+                }
+
+                self.time_period_mgr.before_time_period_change()
+                self.time_period_limits.append(new_period)
+                self._save_time_period_limits()
+
+                event.set_result(
+                    MessageEventResult().message(
+                        f"✅ 已添加时间段限制: {start_time} - {end_time}: {limit} 次"
+                    )
+                )
+
+            except ValueError as e:
+                if "does not match format" in str(e):
+                    event.set_result(
+                        MessageEventResult().message(
+                            "时间格式错误，请使用 HH:MM 格式（如 09:00）"
+                        )
+                    )
+                else:
+                    event.set_result(MessageEventResult().message("限制次数必须为整数"))
 
     @filter.permission_type(PermissionType.ADMIN)
     @limit_command_group.command("timeperiod remove")
     async def limit_timeperiod_remove(self, event: AstrMessageEvent, index: int = None):
         """删除时间段限制（仅管理员）"""
-        if index is None:
-            event.set_result(
-                MessageEventResult().message("用法: /limit timeperiod remove <索引>")
-            )
-            return
-
-        try:
-            index = int(index) - 1  # 转换为0-based索引
-
-            if index < 0 or index >= len(self.time_period_limits):
+        with self.config_loader.lock:
+            if index is None:
                 event.set_result(
-                    MessageEventResult().message(
-                        f"索引无效，请使用 1-{len(self.time_period_limits)} 之间的数字"
-                    )
+                    MessageEventResult().message("用法: /limit timeperiod remove <索引>")
                 )
                 return
 
-            removed_period = self.time_period_limits.pop(index)
-            self._save_time_period_limits()
+            try:
+                index = int(index) - 1  # 转换为0-based索引
 
-            event.set_result(
-                MessageEventResult().message(
-                    f"✅ 已删除时间段限制: {removed_period['start_time']} - {removed_period['end_time']}"
+                if index < 0 or index >= len(self.time_period_limits):
+                    event.set_result(
+                        MessageEventResult().message(
+                            f"索引无效，请使用 1-{len(self.time_period_limits)} 之间的数字"
+                        )
+                    )
+                    return
+
+                self.time_period_mgr.before_time_period_change()
+                removed_period = self.time_period_limits.pop(index)
+                self._save_time_period_limits()
+
+                event.set_result(
+                    MessageEventResult().message(
+                        f"✅ 已删除时间段限制: {removed_period['start_time']} - {removed_period['end_time']}"
+                    )
                 )
-            )
 
-        except ValueError:
-            event.set_result(MessageEventResult().message("索引必须为整数"))
+            except ValueError:
+                event.set_result(MessageEventResult().message("索引必须为整数"))
 
     @filter.permission_type(PermissionType.ADMIN)
     @limit_command_group.command("timeperiod enable")
     async def limit_timeperiod_enable(self, event: AstrMessageEvent, index: int = None):
         """启用时间段限制（仅管理员）"""
-        if index is None:
-            event.set_result(
-                MessageEventResult().message("用法: /limit timeperiod enable <索引>")
-            )
-            return
-
-        try:
-            index = int(index) - 1  # 转换为0-based索引
-
-            if index < 0 or index >= len(self.time_period_limits):
+        with self.config_loader.lock:
+            if index is None:
                 event.set_result(
-                    MessageEventResult().message(
-                        f"索引无效，请使用 1-{len(self.time_period_limits)} 之间的数字"
-                    )
+                    MessageEventResult().message("用法: /limit timeperiod enable <索引>")
                 )
                 return
 
-            self.time_period_limits[index]["enabled"] = True
-            self._save_time_period_limits()
+            try:
+                index = int(index) - 1  # 转换为0-based索引
 
-            period = self.time_period_limits[index]
-            event.set_result(
-                MessageEventResult().message(
-                    f"✅ 已启用时间段限制: {period['start_time']} - {period['end_time']}"
+                if index < 0 or index >= len(self.time_period_limits):
+                    event.set_result(
+                        MessageEventResult().message(
+                            f"索引无效，请使用 1-{len(self.time_period_limits)} 之间的数字"
+                        )
+                    )
+                    return
+
+                self.time_period_mgr.before_time_period_change()
+                self.time_period_limits[index]["enabled"] = True
+                self._save_time_period_limits()
+
+                period = self.time_period_limits[index]
+                event.set_result(
+                    MessageEventResult().message(
+                        f"✅ 已启用时间段限制: {period['start_time']} - {period['end_time']}"
+                    )
                 )
-            )
 
-        except ValueError:
-            event.set_result(MessageEventResult().message("索引必须为整数"))
+            except ValueError:
+                event.set_result(MessageEventResult().message("索引必须为整数"))
 
     @filter.permission_type(PermissionType.ADMIN)
     @limit_command_group.command("timeperiod disable")
@@ -3409,54 +3456,57 @@ class DailyLimitPlugin(star.Star):
         self, event: AstrMessageEvent, index: int = None
     ):
         """禁用时间段限制（仅管理员）"""
-        if index is None:
-            event.set_result(
-                MessageEventResult().message("用法: /limit timeperiod disable <索引>")
-            )
-            return
-
-        try:
-            index = int(index) - 1  # 转换为0-based索引
-
-            if index < 0 or index >= len(self.time_period_limits):
+        with self.config_loader.lock:
+            if index is None:
                 event.set_result(
-                    MessageEventResult().message(
-                        f"索引无效，请使用 1-{len(self.time_period_limits)} 之间的数字"
-                    )
+                    MessageEventResult().message("用法: /limit timeperiod disable <索引>")
                 )
                 return
 
-            self.time_period_limits[index]["enabled"] = False
-            self._save_time_period_limits()
+            try:
+                index = int(index) - 1  # 转换为0-based索引
 
-            period = self.time_period_limits[index]
-            event.set_result(
-                MessageEventResult().message(
-                    f"✅ 已禁用时间段限制: {period['start_time']} - {period['end_time']}"
+                if index < 0 or index >= len(self.time_period_limits):
+                    event.set_result(
+                        MessageEventResult().message(
+                            f"索引无效，请使用 1-{len(self.time_period_limits)} 之间的数字"
+                        )
+                    )
+                    return
+
+                self.time_period_mgr.before_time_period_change()
+                self.time_period_limits[index]["enabled"] = False
+                self._save_time_period_limits()
+
+                period = self.time_period_limits[index]
+                event.set_result(
+                    MessageEventResult().message(
+                        f"✅ 已禁用时间段限制: {period['start_time']} - {period['end_time']}"
+                    )
                 )
-            )
 
-        except ValueError:
-            event.set_result(MessageEventResult().message("索引必须为整数"))
+            except ValueError:
+                event.set_result(MessageEventResult().message("索引必须为整数"))
 
     def _save_time_period_limits(self):
         """保存时间段限制配置到配置文件（新格式：开始时间-结束时间:限制次数:是否启用）"""
-        try:
-            # 构建新的文本格式配置
-            lines = []
-            for period in self.time_period_limits:
-                line = f"{period['start_time']}-{period['end_time']}:{period['limit']}:{str(period['enabled']).lower()}"
-                lines.append(line)
+        with self.config_loader.lock:
+            try:
+                # 构建新的文本格式配置
+                lines = []
+                for period in self.time_period_limits:
+                    line = f"{period['start_time']}-{period['end_time']}:{period['limit']}:{str(period['enabled']).lower()}"
+                    lines.append(line)
 
-            # 更新配置对象
-            self.config["limits"]["time_period_limits"] = "\n".join(lines)
-            # 保存到配置文件
-            self.config.save_config()
-            self._log_info(
-                "已保存时间段限制配置，共 {} 个时间段", len(self.time_period_limits)
-            )
-        except Exception as e:
-            self._log_error("保存时间段限制配置失败: {}", str(e))
+                # 更新配置对象
+                self.config["limits"]["time_period_limits"] = "\n".join(lines)
+                # 保存到配置文件
+                self.config.save_config()
+                self._log_info(
+                    "已保存时间段限制配置，共 {} 个时间段", len(self.time_period_limits)
+                )
+            except Exception as e:
+                self._log_error("保存时间段限制配置失败: {}", str(e))
 
     @filter.permission_type(PermissionType.ADMIN)
     @limit_command_group.command("checkupdate")
@@ -3479,7 +3529,7 @@ class DailyLimitPlugin(star.Star):
             await self.version_checker.check_version_update()
 
             # 检查是否有新版本
-            current_version = self.config.get("version", "v2.8.9")
+            current_version = self.plugin_version
             if self.version_checker.last_checked_version:
                 if (
                     self.version_checker._compare_versions(self.version_checker.last_checked_version, current_version)
@@ -3526,7 +3576,7 @@ class DailyLimitPlugin(star.Star):
     async def limit_version(self, event: AstrMessageEvent):
         """查看当前插件版本信息（仅管理员）"""
         try:
-            current_version = self.config.get("version", "v2.8.9")
+            current_version = self.plugin_version
 
             # 构建版本信息消息
             version_msg = "📦 日调用限制插件版本信息\n"
@@ -3577,7 +3627,7 @@ class DailyLimitPlugin(star.Star):
 ░░░░░░░░░░   ░░░░░   ░░░░░ ░░░░░ ░░░░░░░░░░░    ░░░░░       ░░░░░░░░░░░ ░░░░░ ░░░░░     ░░░░░ ░░░░░    ░░░░░    
                                                                                                                 
                                                                                                                                                                                                       
-                                       每日调用限制插件 v2.8.9                       
+                                       每日调用限制插件 v2.8.10
                                   作者: left666 & Sakura520222                  
     """
 

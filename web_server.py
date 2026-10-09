@@ -8,10 +8,11 @@ Web管理界面服务器
 - 实时统计信息监控
 - 密码保护的安全访问
 
-版本: v2.8.9
+版本: v2.8.10
 作者: Sakura520222
 """
 
+import copy
 import datetime
 import json
 import os
@@ -960,29 +961,70 @@ class WebServer:
         返回：
             dict: 更新后的配置数据
         """
-        try:
-            # 验证配置数据
-            self._validate_config_data(config_data)
+        with self.plugin.config_loader.lock:
+            previous_config = copy.deepcopy(dict(self.plugin.config))
+            previous_rules = [
+                dict(mapping) for mapping in (
+                    self.plugin.group_limits, self.plugin.user_limits, self.plugin.group_modes
+                )
+            ]
+            previous_periods = copy.deepcopy(self.plugin.time_period_limits)
+            previous_skip = list(self.plugin.skip_patterns)
+            previous_redis = self.plugin.redis
+            try:
+                # 验证配置数据
+                self._validate_config_data(config_data)
 
-            # 更新各项配置
-            self._update_limits_config(config_data)
-            self._update_redis_config(config_data)
+                # Migrate with the old order and reset settings before updating them.
+                periods_changed = "time_period_limits" in config_data and (
+                    self.plugin.time_period_mgr.parse_time_period_limits(
+                        config_data["time_period_limits"]
+                    ) != self.plugin.time_period_limits
+                )
+                self.plugin.time_period_mgr.before_time_period_change(
+                    require_redis=periods_changed
+                )
 
-            # 完成配置更新
-            self._finalize_config_update()
+                # 更新各项配置
+                self._update_limits_config(config_data)
+                self._update_redis_config(config_data)
 
-            # 返回更新后的配置数据
-            return self._get_config_data()
+                # 完成配置更新
+                self._finalize_config_update()
 
-        except Exception as e:
-            # 记录错误日志
-            if self.plugin:
-                self.plugin._log_error("更新配置失败: {}", str(e))
-            else:
-                print(f"更新配置失败: {e}")
+                # 返回更新后的配置数据
+                return self._get_config_data()
 
-            # 重新抛出异常，让调用者处理
-            raise
+            except Exception as e:
+                # Keep raw configuration and published maps coherent on failure.
+                changed = dict(self.plugin.config) != previous_config
+                self.plugin.config.clear()
+                self.plugin.config.update(previous_config)
+                for target, previous in zip(
+                    (self.plugin.group_limits, self.plugin.user_limits, self.plugin.group_modes),
+                    previous_rules,
+                    strict=True,
+                ):
+                    target.clear()
+                    target.update(previous)
+                self.plugin.time_period_limits[:] = previous_periods
+                self.plugin.skip_patterns = previous_skip
+                self.plugin.redis = previous_redis
+                if hasattr(self.plugin.redis_client, "redis_client"):
+                    self.plugin.redis_client.redis_client = previous_redis
+                if changed:
+                    try:
+                        self.plugin.config.save_config()
+                    except Exception as rollback_error:  # noqa: BLE001 -- preserve the original failure
+                        self.plugin._log_error("恢复原配置文件失败: {}", str(rollback_error))
+                # 记录错误日志
+                if self.plugin:
+                    self.plugin._log_error("更新配置失败: {}", str(e))
+                else:
+                    print(f"更新配置失败: {e}")
+
+                # 重新抛出异常，让调用者处理
+                raise
 
     def _update_limits_config(self, config_data):
         """

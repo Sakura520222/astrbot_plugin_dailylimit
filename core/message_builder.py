@@ -158,12 +158,7 @@ class MessageBuilder:
 
     def get_current_time_period_info(self, current_time_str):
         """获取当前时间段信息"""
-        for period in self.plugin.time_period_limits:
-            if self.plugin.limiter.is_in_time_period(
-                current_time_str, period["start_time"], period["end_time"]
-            ):
-                return period
-        return None
+        return self.plugin.time_period_mgr.get_current_time_period(current_time_str)
 
     def build_exempt_user_status(
         self, user_id, group_id, time_period_limit, current_time_str
@@ -178,17 +173,16 @@ class MessageBuilder:
         )
 
         # 添加时间段限制信息（即使豁免用户也显示）
-        if time_period_limit is not None:
-            current_period_info = self.get_current_time_period_info(current_time_str)
-            if current_period_info:
-                time_period_msg = self.get_custom_message(
-                    "limit_status_time_period_message",
-                    "\n\n⏰ 当前处于时间段限制：{start_time}-{end_time}\n📋 时间段限制：{time_period_limit} 次",
-                    start_time=current_period_info["start_time"],
-                    end_time=current_period_info["end_time"],
-                    time_period_limit=time_period_limit,
-                )
-                status_msg += time_period_msg
+        current_period_info = self.get_current_time_period_info(current_time_str)
+        if current_period_info:
+            time_period_msg = self.get_custom_message(
+                "limit_status_time_period_message",
+                "\n\n⏰ 当前处于时间段限制：{start_time}-{end_time}\n📋 时间段限制：{time_period_limit} 次",
+                start_time=current_period_info["start_time"],
+                end_time=current_period_info["end_time"],
+                time_period_limit=current_period_info["limit"],
+            )
+            status_msg += time_period_msg
 
         return status_msg
 
@@ -312,25 +306,25 @@ class MessageBuilder:
         self, status_msg, user_id, group_id, time_period_limit, current_time_str
     ):
         """添加时间段限制信息到状态消息"""
-        if time_period_limit is not None:
-            current_period_info = self.get_current_time_period_info(current_time_str)
-            if current_period_info:
-                time_period_usage = self.plugin._get_time_period_usage(user_id, group_id)
-                time_period_remaining = time_period_limit - time_period_usage
-                time_period_progress = self.generate_progress_bar(
-                    time_period_usage, time_period_limit
-                )
+        current_period_info = self.get_current_time_period_info(current_time_str)
+        if current_period_info:
+            time_period_limit = current_period_info["limit"]
+            time_period_usage = self.plugin._get_time_period_usage(user_id, group_id)
+            time_period_remaining = time_period_limit - time_period_usage
+            time_period_progress = self.generate_progress_bar(
+                time_period_usage, time_period_limit
+            )
 
-                time_period_msg = self.get_custom_message(
-                    "limit_status_time_period_message",
-                    "\n\n⏰ 当前处于时间段限制：{start_time}-{end_time}\n📋 时间段限制：{time_period_limit} 次\n📊 时间段内已使用：{time_period_usage}/{time_period_limit} 次\n📈 {time_period_progress}\n🎯 时间段内剩余：{time_period_remaining} 次",
-                    start_time=current_period_info["start_time"],
-                    end_time=current_period_info["end_time"],
-                    time_period_limit=time_period_limit,
-                    time_period_usage=time_period_usage,
-                    time_period_progress=time_period_progress,
-                    time_period_remaining=time_period_remaining,
-                )
-                status_msg += time_period_msg
+            time_period_msg = self.get_custom_message(
+                "limit_status_time_period_message",
+                "\n\n⏰ 当前处于时间段限制：{start_time}-{end_time}\n📋 时间段限制：{time_period_limit} 次\n📊 时间段内已使用：{time_period_usage}/{time_period_limit} 次\n📈 {time_period_progress}\n🎯 时间段内剩余：{time_period_remaining} 次",
+                start_time=current_period_info["start_time"],
+                end_time=current_period_info["end_time"],
+                time_period_limit=time_period_limit,
+                time_period_usage=time_period_usage,
+                time_period_progress=time_period_progress,
+                time_period_remaining=time_period_remaining,
+            )
+            status_msg += time_period_msg
 
         return status_msg

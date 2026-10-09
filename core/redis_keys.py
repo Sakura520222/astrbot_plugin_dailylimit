@@ -219,6 +219,10 @@ class RedisKeys:
         return date_obj.strftime("%Y-%m-%d-%H")
 
     def get_seconds_until_tomorrow(self):
+        """Compatibility name for the configured reset boundary."""
+        return self.get_seconds_until_reset()
+
+    def get_seconds_until_reset(self):
         """
         获取到下次重置时间的秒数
 
