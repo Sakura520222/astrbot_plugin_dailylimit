@@ -261,6 +261,8 @@ class TimePeriodManager:
         current_time_str = datetime.datetime.now().strftime("%H:%M")
 
         for period in self.time_period_limits:
+            if not period.get("enabled", True):
+                continue
             if self.is_in_time_period(
                 current_time_str, period["start_time"], period["end_time"]
             ):
@@ -283,6 +285,8 @@ class TimePeriodManager:
             # 如果没有指定时间段ID，使用当前时间段
             current_time_str = datetime.datetime.now().strftime("%H:%M")
             for i, time_limit in enumerate(self.time_period_limits):
+                if not time_limit.get("enabled", True):
+                    continue
                 if self.is_in_time_period(
                     current_time_str, time_limit["start_time"], time_limit["end_time"]
                 ):

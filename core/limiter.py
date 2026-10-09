@@ -79,6 +79,8 @@ class Limiter:
         current_time_str = datetime.datetime.now().strftime("%H:%M")
 
         for time_limit in self.plugin.time_period_limits:
+            if not time_limit.get("enabled", True):
+                continue
             if self.is_in_time_period(
                 current_time_str, time_limit["start_time"], time_limit["end_time"]
             ):
@@ -92,6 +94,8 @@ class Limiter:
             # 如果没有指定时间段ID，使用当前时间段
             current_time_str = datetime.datetime.now().strftime("%H:%M")
             for i, time_limit in enumerate(self.plugin.time_period_limits):
+                if not time_limit.get("enabled", True):
+                    continue
                 if self.is_in_time_period(
                     current_time_str, time_limit["start_time"], time_limit["end_time"]
                 ):

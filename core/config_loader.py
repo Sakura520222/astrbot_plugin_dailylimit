@@ -34,6 +34,11 @@ class ConfigLoader:
         返回：
             bool: 加载成功返回True，失败返回False
         """
+        # 原地清空旧规则，确保删除配置后恢复默认，同时保留其他模块的字典引用。
+        self.plugin.group_limits.clear()
+        self.plugin.user_limits.clear()
+        self.plugin.group_modes.clear()
+
         self.parse_group_limits()
         self.parse_user_limits()
         self.parse_group_modes()
