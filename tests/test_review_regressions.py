@@ -126,7 +126,7 @@ class TimePeriodRequestTests(unittest.TestCase):
         key_after = self.plugin.limiter.get_time_period_usage_key("20")
         self.assertEqual(key_after, key_before)
         self.assert_request_period(3, 4)
-        self.assertEqual(self.plugin.redis.ttl(key_after), 7200)
+        self.assertEqual(self.plugin.redis.ttl(key_after), 43200)
         self.assertTrue(request(self.plugin)[0])
         self.assertFalse(request(self.plugin)[0])
         self.assertEqual(self.plugin.redis.get(key_after), 4)
@@ -150,13 +150,13 @@ class TimePeriodRequestTests(unittest.TestCase):
         self.assertTrue(request(self.plugin)[0])
         self.assertFalse(request(self.plugin)[0])
 
-    def test_legacy_and_existing_stable_counts_merge_once_with_longer_ttl(self):
+    def test_legacy_and_existing_stable_counts_merge_once_until_configured_reset(self):
         self.add("00:00", "23:59", 6)
         self.assertTrue(request(self.plugin)[0])
         stable_key = self.plugin.limiter.get_time_period_usage_key("20")
         stable_ttl = self.plugin.redis.ttl(stable_key)
         legacy_key = "astrbot:time_period_limit:2026-10-09:0:private_chat:20"
-        self.plugin.redis.set(legacy_key, 2, ex=120)
+        self.plugin.redis.set(legacy_key, 2, ex=86400)
         # A real command forces migration even after an earlier empty legacy scan.
         asyncio.run(self.plugin.limit_timeperiod_disable(Event("admin"), 1))
         asyncio.run(self.plugin.limit_timeperiod_enable(Event("admin"), 1))
@@ -167,6 +167,112 @@ class TimePeriodRequestTests(unittest.TestCase):
         self.plugin.time_period_mgr.before_time_period_change()
         self.assertEqual(self.plugin.redis.get(stable_key), 3)
         self.assertEqual(series(self.plugin, 4), [True, True, True, False])
+
+    def test_exhausted_migrated_quota_survives_midnight_until_custom_reset(self):
+        self.plugin = make_plugin({"daily_reset_time": "06:00",
+                                   "time_period_limits": "00:00-23:59:1:true"},
+                                  at=FixedDateTime(2026, 10, 9, 23))
+        legacy_key = "astrbot:time_period_limit:2026-10-09:0:private_chat:20"
+        self.plugin.redis.set(legacy_key, 1, ex=3600)
+        self.plugin.time_period_mgr._migration_checked_redis = None
+        allowed, event = request(self.plugin)
+        self.assertFalse(allowed)
+        self.assertTrue(event.stopped)
+        stable_key = self.plugin.limiter.get_time_period_usage_key("20")
+        self.assertIn(":2026-10-09:", stable_key)
+        self.assertEqual(self.plugin.redis.get(stable_key), 1)
+        original_ttl = self.plugin.redis.ttl(stable_key)
+        self.assertIsNone(self.plugin.redis.get(legacy_key))
+        # No accepted request renews expiry before the reset boundary.
+        for hour, minute, expected_ttl in [(0, 0, 21600), (5, 59, 60)]:
+            self.at(10, hour, minute)
+            allowed, event = request(self.plugin)
+            self.assertFalse(allowed, "exhausted quota reopened before configured reset")
+            self.assertTrue(event.stopped)
+            self.assertEqual(self.plugin.limiter.get_time_period_usage_key("20"), stable_key)
+            self.assertEqual(self.plugin.redis.get(stable_key), 1)
+            self.assertEqual(self.plugin.redis.ttl(stable_key), expected_ttl)
+            self.assertEqual(self.plugin.redis.lists, {})
+        self.assertEqual(original_ttl, 25200)
+        self.at(10, 6)
+        self.assertIsNone(self.plugin.redis.get(stable_key))
+        self.assertTrue(request(self.plugin)[0])
+        new_key = self.assert_request_period(1, 1)
+        self.assertIn(":2026-10-10:", new_key)
+        self.assertEqual(self.plugin.redis.ttl(new_key), 86400)
+        self.assert_records("2026-10-10", 1, 86400)
+
+    def test_calendar_and_reset_legacy_buckets_share_next_reset_expiry(self):
+        self.plugin = make_plugin({"daily_reset_time": "06:00",
+                                   "time_period_limits": "00:00-23:59:3:true"},
+                                  at=FixedDateTime(2026, 10, 9, 5, 59))
+        calendar_key = "astrbot:time_period_limit:2026-10-09:0:private_chat:20"
+        reset_key = "astrbot:time_period_limit:2026-10-08:0:private_chat:20"
+        self.plugin.redis.set(calendar_key, 1, ex=86400)
+        self.plugin.redis.set(reset_key, 2, ex=10)
+        self.plugin.time_period_mgr._migration_checked_redis = None
+        self.assertFalse(request(self.plugin)[0])
+        stable_key = self.assert_request_period(3, 3)
+        self.assertIn(":2026-10-08:", stable_key)
+        self.assertEqual(self.plugin.redis.ttl(stable_key), 60)
+        self.assertIsNone(self.plugin.redis.get(calendar_key))
+        self.assertIsNone(self.plugin.redis.get(reset_key))
+        self.at(9, 6)
+        self.assertTrue(request(self.plugin)[0])
+        new_key = self.assert_request_period(1, 3)
+        self.assertIn(":2026-10-09:", new_key)
+        self.assertEqual(self.plugin.redis.ttl(new_key), 86400)
+
+    def test_existing_short_lived_stable_counter_is_repaired_before_request(self):
+        self.plugin = make_plugin({"daily_reset_time": "06:00",
+                                   "time_period_limits": "00:00-23:59:1:true"},
+                                  at=FixedDateTime(2026, 10, 9, 23))
+        identity = self.plugin.time_period_mgr.get_time_period_id(self.plugin.time_period_limits[0])
+        stable_key = f"astrbot:time_period_limit:2026-10-09:{identity}:private_chat:20"
+        historical_key = f"astrbot:time_period_limit:2026-10-08:{identity}:private_chat:20"
+        self.plugin.redis.set(stable_key, 1, ex=3600)
+        self.plugin.redis.set(historical_key, 9, ex=7200)
+        self.plugin.time_period_mgr._migration_checked_redis = None
+        self.assertFalse(request(self.plugin)[0])
+        self.assertEqual(self.plugin.redis.get(stable_key), 1)
+        self.assertEqual(self.plugin.redis.ttl(stable_key), 25200)
+        self.assertEqual(self.plugin.redis.get(historical_key), 9)
+        self.assertEqual(self.plugin.redis.ttl(historical_key), 7200)
+        for hour, minute, expected_ttl in [(0, 0, 21600), (5, 59, 60)]:
+            self.at(10, hour, minute)
+            allowed, event = request(self.plugin)
+            self.assertFalse(allowed)
+            self.assertTrue(event.stopped)
+            self.assertEqual(self.plugin.redis.get(stable_key), 1)
+            self.assertEqual(self.plugin.redis.ttl(stable_key), expected_ttl)
+            self.assertEqual(self.plugin.redis.lists, {})
+        self.at(10, 6)
+        self.assertTrue(request(self.plugin)[0])
+        new_key = self.assert_request_period(1, 1)
+        self.assertIn(":2026-10-10:", new_key)
+        self.assertEqual(self.plugin.redis.ttl(new_key), 86400)
+        self.assert_records("2026-10-10", 1, 86400)
+
+    def test_historical_migration_preserves_original_expiry_policy(self):
+        self.plugin = make_plugin({"daily_reset_time": "06:00",
+                                   "time_period_limits": "00:00-23:59:3:true"},
+                                  at=FixedDateTime(2026, 10, 9, 23))
+        identity = self.plugin.time_period_mgr.get_time_period_id(self.plugin.time_period_limits[0])
+        for date, old_ttl, new_ttl, expected_ttl in [
+            ("2026-10-05", 120, None, 120),
+            ("2026-10-06", 120, 240, 240),
+            ("2026-10-07", None, 240, -1),
+        ]:
+            with self.subTest(date=date):
+                legacy = f"astrbot:time_period_limit:{date}:0:private_chat:20"
+                target = f"astrbot:time_period_limit:{date}:{identity}:private_chat:20"
+                self.plugin.redis.set(legacy, 2, ex=old_ttl)
+                if new_ttl is not None:
+                    self.plugin.redis.set(target, 1, ex=new_ttl)
+                self.plugin.time_period_mgr.before_time_period_change()
+                self.assertIsNone(self.plugin.redis.get(legacy))
+                self.assertEqual(self.plugin.redis.get(target), 2 if new_ttl is None else 3)
+                self.assertEqual(self.plugin.redis.ttl(target), expected_ttl)
 
     def test_unknown_legacy_index_stops_requests_without_changing_counters(self):
         self.plugin = make_plugin({"time_period_limits": "11:00-13:00:1:true"})

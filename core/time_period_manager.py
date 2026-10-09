@@ -22,15 +22,19 @@ class TimePeriodManager:
     MIGRATE_COUNTER = """
 local old_value = redis.call('GET', KEYS[1])
 if not old_value then return 0 end
+local reset_ttl = tonumber(ARGV[1])
 local new_value = redis.call('GET', KEYS[2])
 if not new_value then
     redis.call('RENAME', KEYS[1], KEYS[2])
+    if reset_ttl > 0 then redis.call('PEXPIRE', KEYS[2], reset_ttl) end
     return 1
 end
 local old_ttl = redis.call('PTTL', KEYS[1])
 local new_ttl = redis.call('PTTL', KEYS[2])
 redis.call('INCRBY', KEYS[2], old_value)
-if old_ttl == -1 or new_ttl == -1 then
+if reset_ttl > 0 then
+    redis.call('PEXPIRE', KEYS[2], reset_ttl)
+elseif old_ttl == -1 or new_ttl == -1 then
     redis.call('PERSIST', KEYS[2])
 else
     redis.call('PEXPIRE', KEYS[2], math.max(old_ttl, new_ttl))
@@ -360,6 +364,7 @@ return 1
             if match:
                 legacy.append((key, match.groups()))
         if not legacy:
+            self._align_current_counter_expiry(redis)
             self._migration_checked_redis = redis
             return 0
 
@@ -384,16 +389,33 @@ return 1
 
         reset_date = self.plugin.redis_keys.get_reset_period_date()
         calendar_date = datetime.datetime.now().strftime("%Y-%m-%d")
+        reset_ttl = max(1, self.plugin.redis_keys.get_seconds_until_reset()) * 1000
         migrated = 0
         for old_key, (date, index, suffix) in legacy:
             # Old Limiter used calendar days, while the other counter path used
             # reset periods. Carry both active buckets into the same budget.
-            if date in (calendar_date, reset_date):
+            active = date in (calendar_date, reset_date)
+            if active:
                 date = reset_date
             new_key = f"astrbot:time_period_limit:{date}:{mapping[index]}:{suffix}"
-            migrated += int(redis.eval(self.MIGRATE_COUNTER, 2, old_key, new_key))
+            migrated += int(redis.eval(
+                self.MIGRATE_COUNTER, 2, old_key, new_key, reset_ttl if active else 0
+            ))
+        self._align_current_counter_expiry(redis)
         self._migration_checked_redis = redis
         return migrated
+
+    def _align_current_counter_expiry(self, redis):
+        """Repair short-lived v2 counters from an earlier interrupted upgrade.
+
+        Requests that are already exhausted do not increment and cannot repair
+        their TTL there. Only the current reset-period keys are adjusted; their
+        values and historical buckets remain untouched.
+        """
+        date = self.plugin.redis_keys.get_reset_period_date()
+        milliseconds = max(1, self.plugin.redis_keys.get_seconds_until_reset()) * 1000
+        for key in redis.scan_iter(match=f"astrbot:time_period_limit:{date}:v2_*:*"):
+            redis.pexpire(key, milliseconds)
 
     def get_current_time_period_limit(self):
         """获取当前时间段适用的限制

@@ -34,6 +34,35 @@ redis.call('DEL', KEYS[1])
 return 1
 """
 
+_RESET_MIGRATION_SCRIPT = """
+local old_value = redis.call('GET', KEYS[1])
+if not old_value then return 0 end
+local reset_ttl = tonumber(ARGV[1])
+local new_value = redis.call('GET', KEYS[2])
+if not new_value then
+    redis.call('RENAME', KEYS[1], KEYS[2])
+    if reset_ttl > 0 then redis.call('PEXPIRE', KEYS[2], reset_ttl) end
+    return 1
+end
+local old_ttl = redis.call('PTTL', KEYS[1])
+local new_ttl = redis.call('PTTL', KEYS[2])
+redis.call('INCRBY', KEYS[2], old_value)
+if reset_ttl > 0 then
+    redis.call('PEXPIRE', KEYS[2], reset_ttl)
+elseif old_ttl == -1 or new_ttl == -1 then
+    redis.call('PERSIST', KEYS[2])
+else
+    redis.call('PEXPIRE', KEYS[2], math.max(old_ttl, new_ttl))
+end
+redis.call('DEL', KEYS[1])
+return 1
+"""
+
+_SUPPORTED_MIGRATIONS = {
+    "".join(_MIGRATION_SCRIPT.split()): False,
+    "".join(_RESET_MIGRATION_SCRIPT.split()): True,
+}
+
 
 class MemoryRedis:
     def __init__(self, now=None):
@@ -280,30 +309,40 @@ class MemoryRedis:
     def _check_script(script):
         if isinstance(script, bytes):
             script = script.decode("utf-8")
-        if "".join(script.split()) != "".join(_MIGRATION_SCRIPT.split()):
+        normalized = "".join(script.split())
+        if normalized not in _SUPPORTED_MIGRATIONS:
             raise NotImplementedError("MemoryRedis only models the known two-key counter migration")
+        return _SUPPORTED_MIGRATIONS[normalized]
 
     def eval(self, script, numkeys, *keys_and_args):
         """Atomically model the known script; this does not execute Lua.
 
-        Missing targets are renamed, preserving their value and deadline.
-        Existing integer counters are summed. The greater remaining PTTL is
-        retained unless either key is persistent, then the target is persistent.
+        Missing targets are renamed and existing integer counters are summed.
+        The new script takes an active-period TTL in milliseconds: a positive
+        TTL replaces the target lifetime, even when either key was persistent.
+        Zero retains historical-key behavior: preserve the renamed deadline or
+        retain the greater remaining PTTL; either persistent key wins a merge.
+        The old script accepts no arguments and always uses historical behavior.
         """
         with self._lock:
-            self._check_script(script)
-            if int(numkeys) != 2 or len(keys_and_args) != 2:
-                raise ValueError("Counter migration requires exactly two keys and no arguments")
-            source, destination = map(self._name, keys_and_args)
+            active_script = self._check_script(script)
+            if int(numkeys) != 2 or len(keys_and_args) != 2 + int(active_script):
+                raise ValueError("Counter migration requires two keys and the script's exact arguments")
+            source, destination = map(self._name, keys_and_args[:2])
             old_value = self.get(source)
             if old_value is None:
                 return 0
+            active_ttl = float(keys_and_args[2]) if active_script else 0
             if self.get(destination) is None:
                 self.rename(source, destination)
+                if active_ttl > 0:
+                    self.pexpire(destination, active_ttl)
                 return 1
             old_ttl, new_ttl = self.pttl(source), self.pttl(destination)
             self.incrby(destination, old_value)
-            if old_ttl == -1 or new_ttl == -1:
+            if active_ttl > 0:
+                self.pexpire(destination, active_ttl)
+            elif old_ttl == -1 or new_ttl == -1:
                 self.persist(destination)
             else:
                 self.pexpire(destination, max(old_ttl, new_ttl))
