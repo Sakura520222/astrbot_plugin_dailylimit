@@ -145,14 +145,14 @@ class TimePeriodTests(unittest.TestCase):
         self.assertEqual(series(self.plugin, 6), [True] * 5 + [False])
         self.assertEqual(self.plugin.redis.get(period_key), 1)
 
-    def test_disabled_overlap_keeps_original_period_index(self):
+    def test_disabled_overlap_selects_original_period_identity(self):
         self.add(1)
         self.add(4)
         self.add(2)
         self.disable(1)
         self.assertEqual(self.plugin.limiter.get_current_time_period_limit(), 4)
         self.assertEqual(self.plugin.time_period_mgr.get_current_time_period_limit(), 4)
-        expected = "astrbot:time_period_limit:2026-10-09:1:100:20"
+        expected = self.plugin.limiter.get_time_period_usage_key("20", "100", 1)
         self.assertEqual(self.plugin.limiter.get_time_period_usage_key("20", "100"), expected)
         self.assertEqual(self.plugin.time_period_mgr.get_time_period_usage_key("20", "100"), expected)
         self.assertTrue(self.plugin.limiter.increment_time_period_usage("20", "100"))
@@ -170,8 +170,9 @@ class TimePeriodTests(unittest.TestCase):
         self.add(4, "22:00", "06:00")
         with patch.object(FixedDateTime, "now", return_value=FixedDateTime(2026, 10, 9, 1)):
             self.assertEqual(self.plugin.limiter.get_current_time_period_limit(), 4)
-            self.assertEqual(self.plugin.limiter.get_time_period_usage_key("20"),
-                             "astrbot:time_period_limit:2026-10-09:0:private_chat:20")
+            expected = self.plugin.limiter.get_time_period_usage_key("20", time_period_id=0)
+            self.assertEqual(self.plugin.limiter.get_time_period_usage_key("20"), expected)
+            self.assertIn(":2026-10-09:", expected)
 
     def test_explicit_period_id_remains_compatible(self):
         self.add(1)

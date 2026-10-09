@@ -9,10 +9,35 @@
 """
 
 import datetime
+import hashlib
+import json
+import re
 
 
 class TimePeriodManager:
     """时间段管理类"""
+
+    LEGACY_IDS_KEY = "astrbot:time_period_limit:legacy_ids:v2"
+    LEGACY_KEY = re.compile(r"^astrbot:time_period_limit:([^:]+):(\d+):(.+)$")
+    MIGRATE_COUNTER = """
+local old_value = redis.call('GET', KEYS[1])
+if not old_value then return 0 end
+local new_value = redis.call('GET', KEYS[2])
+if not new_value then
+    redis.call('RENAME', KEYS[1], KEYS[2])
+    return 1
+end
+local old_ttl = redis.call('PTTL', KEYS[1])
+local new_ttl = redis.call('PTTL', KEYS[2])
+redis.call('INCRBY', KEYS[2], old_value)
+if old_ttl == -1 or new_ttl == -1 then
+    redis.call('PERSIST', KEYS[2])
+else
+    redis.call('PEXPIRE', KEYS[2], math.max(old_ttl, new_ttl))
+end
+redis.call('DEL', KEYS[1])
+return 1
+"""
 
     def __init__(self, plugin):
         """
@@ -24,7 +49,18 @@ class TimePeriodManager:
         self.plugin = plugin
         self.config = plugin.config
         self.logger = plugin.logger
-        self.time_period_limits = plugin.time_period_limits
+        self._migration_checked_redis = None
+
+    @property
+    def lock(self):
+        """All rule readers and writers use the loader's reentrant lock."""
+        return self.plugin.config_loader.lock
+
+    @property
+    def time_period_limits(self):
+        """Return a snapshot instead of retaining a list replaced during reload."""
+        with self.lock:
+            return [dict(period) for period in self.plugin.time_period_limits]
 
     def parse_time_period_limits(self, limits_config=None):
         """解析时间段限制配置
@@ -36,7 +72,10 @@ class TimePeriodManager:
             list: 解析后的时间段限制列表
         """
         if limits_config is None:
-            limits_config = self.config["limits"].get("time_period_limits", "")
+            with self.lock:
+                limits_config = self.config["limits"].get("time_period_limits", "")
+                if isinstance(limits_config, list):
+                    limits_config = list(limits_config)
 
         # 处理配置值，兼容字符串和列表两种格式
         if isinstance(limits_config, str):
@@ -85,14 +124,23 @@ class TimePeriodManager:
         # 解析启用标志
         enabled = self.parse_enabled_flag_from_line(line)
 
-        # 如果启用，则返回时间段限制
-        if enabled:
-            return {
-                "start_time": time_range_data["start_time"],
-                "end_time": time_range_data["end_time"],
-                "limit": limit_data,
-            }
-        return None
+        # Keep disabled entries too: legacy indexes and command indexes depend
+        # on the saved order, including disabled rules.
+        return {
+            "start_time": time_range_data["start_time"],
+            "end_time": time_range_data["end_time"],
+            "limit": limit_data,
+            "enabled": enabled,
+        }
+
+    def _split_time_period_line(self, line):
+        """Separate fields without splitting the colons inside HH:MM."""
+        match = re.fullmatch(
+            r"\s*(\d{1,2}:\d{1,2})\s*-\s*(\d{1,2}:\d{1,2})\s*:\s*([+-]?\d+)"
+            r"(?:\s*:\s*([^:]*))?\s*",
+            line,
+        )
+        return match.groups() if match else None
 
     def parse_time_range_from_line(self, line):
         """从配置行中解析时间范围
@@ -103,17 +151,12 @@ class TimePeriodManager:
         Returns:
             dict: 包含start_time和end_time的字典，解析失败返回None
         """
-        parts = self._validate_config_line(line, ":", 2)
+        parts = self._split_time_period_line(line)
         if not parts:
             return None
 
-        time_range = parts[0].strip()
-        time_parts = self._validate_config_line(time_range, "-", 2)
-        if not time_parts:
-            return None
-
-        start_time = time_parts[0].strip()
-        end_time = time_parts[1].strip()
+        start_time = parts[0].strip()
+        end_time = parts[1].strip()
 
         # 验证时间格式
         if not self.validate_time_format(start_time) or not self.validate_time_format(end_time):
@@ -131,11 +174,11 @@ class TimePeriodManager:
         Returns:
             int: 限制次数，解析失败返回None
         """
-        parts = self._validate_config_line(line, ":", 2)
+        parts = self._split_time_period_line(line)
         if not parts:
             return None
 
-        limit = self._safe_parse_int(parts[1].strip())
+        limit = self._safe_parse_int(parts[2].strip())
         if limit is not None:
             return limit
         else:
@@ -151,12 +194,8 @@ class TimePeriodManager:
         Returns:
             bool: 是否启用
         """
-        line = line.strip()
-        parts = line.split(":", 2)
-
-        if len(parts) >= 3:
-            return self._parse_enabled_flag(parts[2])
-        return True
+        parts = self._split_time_period_line(line)
+        return self._parse_enabled_flag(parts[3]) if parts else True
 
     def validate_time_format(self, time_str):
         """验证时间格式
@@ -248,9 +287,113 @@ class TimePeriodManager:
             start_time = datetime.datetime.strptime(start_time_str, "%H:%M")
             end_time = datetime.datetime.strptime(end_time_str, "%H:%M")
 
-            return start_time <= current_time <= end_time
-        except ValueError:
+            if start_time <= end_time:
+                return start_time <= current_time <= end_time
+            return current_time >= start_time or current_time <= end_time
+        except (ValueError, TypeError):
             return False
+
+    def get_current_time_period(self, current_time_str=None):
+        """Choose one enabled window for limits, counts and status displays."""
+        with self.lock:
+            if current_time_str is None:
+                current_time_str = datetime.datetime.now().strftime("%H:%M")
+            for period in self.plugin.time_period_limits:
+                if period.get("enabled", True) and self.is_in_time_period(
+                    current_time_str, period["start_time"], period["end_time"]
+                ):
+                    return dict(period)
+            return None
+
+    def get_time_period_id(self, period):
+        """A window keeps its budget when reordered, disabled or edited."""
+        start = self._normalize_time(period["start_time"])
+        end = self._normalize_time(period["end_time"])
+        digest = hashlib.sha256(f"{start}-{end}".encode()).hexdigest()[:24]
+        return f"v2_{digest}"
+
+    def _normalize_time(self, time_str):
+        hour, minute = map(int, time_str.split(":"))
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            raise ValueError(f"时间格式错误: {time_str}")
+        return f"{hour:02d}:{minute:02d}"
+
+    def _redis(self):
+        client = getattr(self.plugin, "redis_client", None)
+        return getattr(client, "redis", None) if client else None
+
+    def before_time_period_change(self, require_redis=True):
+        """Migrate while old indexes still identify the original windows.
+
+        Call under the loader lock before every list mutation or replacement.
+        Startup may defer migration until the Redis connection is initialized.
+        """
+        with self.lock:
+            redis = self._redis()
+            if redis is None:
+                if require_redis:
+                    raise RuntimeError("Redis不可用，无法在修改时段规则前保留旧计数")
+                return 0
+            return self._migrate_legacy_counts(redis)
+
+    def ensure_legacy_counts(self):
+        """Run before quota reads so migration errors cannot become zero usage."""
+        with self.lock:
+            redis = self._redis()
+            if redis is None:
+                raise RuntimeError("Redis不可用，无法验证旧时段计数")
+            if self._migration_checked_redis is redis:
+                return 0
+            return self._migrate_legacy_counts(redis)
+
+    def _migrate_legacy_counts(self, redis):
+        """Freeze the original mapping and move each counter atomically.
+
+        The permanent sidecar lets a restart finish an interrupted migration
+        after rules have been reordered. Mixed old/new plugin writers are not
+        supported because an old index has no recoverable window identity.
+        """
+        legacy = []
+        for raw_key in redis.scan_iter(match="astrbot:time_period_limit:*"):
+            key = raw_key.decode() if isinstance(raw_key, bytes) else raw_key
+            match = self.LEGACY_KEY.fullmatch(key)
+            if match:
+                legacy.append((key, match.groups()))
+        if not legacy:
+            self._migration_checked_redis = redis
+            return 0
+
+        encoded_mapping = redis.get(self.LEGACY_IDS_KEY)
+        if encoded_mapping is None:
+            mapping = {
+                str(index): self.get_time_period_id(period)
+                for index, period in enumerate(self.plugin.time_period_limits)
+            }
+            if any(index not in mapping for _, (_, index, _) in legacy):
+                raise RuntimeError("旧时段计数的索引无法匹配已加载规则，拒绝重新分配额度")
+            redis.set(self.LEGACY_IDS_KEY, json.dumps(mapping, sort_keys=True), nx=True)
+            encoded_mapping = redis.get(self.LEGACY_IDS_KEY)
+        mapping = json.loads(encoded_mapping)
+        if not isinstance(mapping, dict) or any(
+            not isinstance(identity, str) or not re.fullmatch(r"v2_[0-9a-f]{24}", identity)
+            for identity in mapping.values()
+        ):
+            raise RuntimeError("旧时段计数映射无效，拒绝重新分配额度")
+        if any(index not in mapping for _, (_, index, _) in legacy):
+            raise RuntimeError("旧时段计数不在已保存的迁移映射中，拒绝重新分配额度")
+
+        reset_date = self.plugin.redis_keys.get_reset_period_date()
+        calendar_date = datetime.datetime.now().strftime("%Y-%m-%d")
+        migrated = 0
+        for old_key, (date, index, suffix) in legacy:
+            # Old Limiter used calendar days, while the other counter path used
+            # reset periods. Carry both active buckets into the same budget.
+            if date in (calendar_date, reset_date):
+                date = reset_date
+            new_key = f"astrbot:time_period_limit:{date}:{mapping[index]}:{suffix}"
+            migrated += int(redis.eval(self.MIGRATE_COUNTER, 2, old_key, new_key))
+        self._migration_checked_redis = redis
+        return migrated
 
     def get_current_time_period_limit(self):
         """获取当前时间段适用的限制
@@ -258,17 +401,8 @@ class TimePeriodManager:
         Returns:
             int: 当前时间段的限制次数，如果不在任何时间段内返回None
         """
-        current_time_str = datetime.datetime.now().strftime("%H:%M")
-
-        for period in self.time_period_limits:
-            if not period.get("enabled", True):
-                continue
-            if self.is_in_time_period(
-                current_time_str, period["start_time"], period["end_time"]
-            ):
-                return period["limit"]
-
-        return None
+        period = self.get_current_time_period()
+        return period["limit"] if period else None
 
     def get_time_period_usage_key(self, user_id, group_id=None, time_period_id=None):
         """获取时间段使用次数的Redis键
@@ -281,27 +415,23 @@ class TimePeriodManager:
         Returns:
             str: Redis键，如果当前不在任何时间段内返回None
         """
-        if time_period_id is None:
-            # 如果没有指定时间段ID，使用当前时间段
-            current_time_str = datetime.datetime.now().strftime("%H:%M")
-            for i, time_limit in enumerate(self.time_period_limits):
-                if not time_limit.get("enabled", True):
-                    continue
-                if self.is_in_time_period(
-                    current_time_str, time_limit["start_time"], time_limit["end_time"]
-                ):
-                    time_period_id = i
-                    break
-
+        with self.lock:
             if time_period_id is None:
-                return None
+                period = self.get_current_time_period()
+                if period is None:
+                    return None
+                time_period_id = self.get_time_period_id(period)
+            elif str(time_period_id).isdigit():
+                index = int(time_period_id)
+                if index < len(self.plugin.time_period_limits):
+                    time_period_id = self.get_time_period_id(self.plugin.time_period_limits[index])
 
-        if group_id is None:
-            group_id = "private_chat"
-
-        # 使用与today_key相同的逻辑，确保日期一致性
-        date_str = self.plugin.usage_tracker._get_reset_period_date()
-        return f"astrbot:time_period_limit:{date_str}:{time_period_id}:{group_id}:{user_id}"
+            if self._redis() is not None:
+                self.ensure_legacy_counts()
+            if group_id is None:
+                group_id = "private_chat"
+            date_str = self.plugin.redis_keys.get_reset_period_date()
+            return f"astrbot:time_period_limit:{date_str}:{time_period_id}:{group_id}:{user_id}"
 
     def get_time_period_usage(self, user_id, group_id=None):
         """获取用户在时间段内的使用次数
@@ -313,16 +443,15 @@ class TimePeriodManager:
         Returns:
             int: 使用次数
         """
-        redis_client = self.plugin.redis_client
-        if not redis_client or not redis_client.redis:
-            return 0
-
-        key = self.get_time_period_usage_key(user_id, group_id)
-        if key is None:
-            return 0
-
-        usage = redis_client.redis.get(key)
-        return int(usage) if usage else 0
+        with self.lock:
+            redis = self._redis()
+            if redis is None:
+                return 0
+            key = self.get_time_period_usage_key(user_id, group_id)
+            if key is None:
+                return 0
+            usage = redis.get(key)
+            return int(usage) if usage else 0
 
     def increment_time_period_usage(self, user_id, group_id=None):
         """增加用户在时间段内的使用次数
@@ -334,17 +463,15 @@ class TimePeriodManager:
         Returns:
             bool: 是否成功增加
         """
-        redis_client = self.plugin.redis_client
-        if not redis_client or not redis_client.redis:
-            return False
-
-        key = self.get_time_period_usage_key(user_id, group_id)
-        if key is None:
-            return False
-
-        redis_client.redis.incr(key)
-        # 设置过期时间到第二天
-        seconds_until_tomorrow = self.plugin.usage_tracker._get_seconds_until_tomorrow()
-        redis_client.redis.expire(key, seconds_until_tomorrow)
-
-        return True
+        with self.lock:
+            redis = self._redis()
+            if redis is None:
+                return False
+            key = self.get_time_period_usage_key(user_id, group_id)
+            if key is None:
+                return False
+            pipe = redis.pipeline()
+            pipe.incr(key)
+            pipe.expire(key, self.plugin.redis_keys.get_seconds_until_reset())
+            pipe.execute()
+            return True

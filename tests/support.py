@@ -16,13 +16,17 @@ import time
 import types
 from pathlib import Path
 
+from redis_stub import MemoryRedis
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class FixedDateTime(datetime.datetime):
+    current = None
+
     @classmethod
     def now(cls, tz=None):
-        value = cls(2026, 10, 9, 12, 0, 0)
+        value = cls.current or cls(2026, 10, 9, 12, 0, 0)
         return value if tz is None else value.replace(tzinfo=tz)
 
 
@@ -47,64 +51,9 @@ class FakeLogger:
         return lambda *args, **kwargs: self.entries.append((name, args))
 
 
-class MemoryRedis:
-    def __init__(self):
-        self.strings = {}
-        self.lists = {}
-        self.hashes = {}
-        self.expiries = {}
-
-    def get(self, key):
-        return self.strings.get(key)
-
-    def incr(self, key):
-        self.strings[key] = int(self.strings.get(key, 0)) + 1
-        return self.strings[key]
-
-    def rpush(self, key, value):
-        self.lists.setdefault(key, []).append(value)
-        return len(self.lists[key])
-
-    def expire(self, key, seconds):
-        self.expiries[key] = seconds
-        return True
-
-    def hincrby(self, key, field, increment):
-        values = self.hashes.setdefault(key, {})
-        values[field] = int(values.get(field, 0)) + increment
-        return values[field]
-
-    def hget(self, key, field):
-        return self.hashes.get(key, {}).get(field)
-
-    def hset(self, key, field, value):
-        self.hashes.setdefault(key, {})[field] = value
-
-    def exists(self, key):
-        return key in self.strings or key in self.lists or key in self.hashes
-
-    def pipeline(self):
-        return Pipeline(self)
-
-
-class Pipeline:
-    def __init__(self, redis):
-        self.redis = redis
-        self.actions = []
-
-    def __getattr__(self, name):
-        def append(*args):
-            self.actions.append((name, args))
-            return self
-        return append
-
-    def execute(self):
-        return [getattr(self.redis, name)(*args) for name, args in self.actions]
-
-
 class FakeRedisClient:
     def __init__(self, plugin):
-        self.redis = MemoryRedis()
+        self.redis = MemoryRedis(now=lambda: FixedDateTime.now().timestamp())
 
     def init_redis(self):
         return True
@@ -224,7 +173,8 @@ DEFAULT_CONFIG = {
 }
 
 
-def make_plugin(updates=None):
+def make_plugin(updates=None, at=None):
+    FixedDateTime.current = at or FixedDateTime(2026, 10, 9, 12, 0, 0)
     config = copy.deepcopy(DEFAULT_CONFIG)
     if updates:
         config["limits"].update(updates)
@@ -247,7 +197,8 @@ def web_save(plugin, updates):
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     original = next(node for node in tree.body if isinstance(node, ast.ClassDef)
                     and node.name == "WebServer")
-    names = {"_update_limits_config", "_update_default_daily_limit", "_update_user_list",
+    names = {"_update_config", "_validate_config_data", "_get_config_data", "_update_redis_config",
+             "_update_limits_config", "_update_default_daily_limit", "_update_user_list",
              "_update_string_config", "_update_list_config", "_update_custom_messages",
              "_finalize_config_update"}
     body = [node for node in original.body if isinstance(node, ast.FunctionDef)
@@ -255,9 +206,8 @@ def web_save(plugin, updates):
     extracted = ast.ClassDef(name="WebConfig", bases=[], keywords=[], body=body,
                              decorator_list=[])
     module = ast.Module(body=[extracted], type_ignores=[])
-    namespace = {}
+    namespace = {"copy": copy}
     exec(compile(ast.fix_missing_locations(module), str(path), "exec"), namespace)  # noqa: S102 -- trusted repository source
     web = namespace["WebConfig"]()
     web.plugin = plugin
-    web._update_limits_config(updates)
-    web._finalize_config_update()
+    return web._update_config(updates)

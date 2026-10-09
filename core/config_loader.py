@@ -4,6 +4,8 @@
 负责从配置文件加载和解析所有限制相关设置。
 """
 
+import threading
+
 
 class ConfigLoader:
     """配置加载器类"""
@@ -18,6 +20,9 @@ class ConfigLoader:
         self.plugin = plugin
         self.config = plugin.config
         self.logger = plugin.logger
+        # WebUI runs in another thread; readers and writers share this lock.
+        self.lock = threading.RLock()
+        self._loaded = False
 
     def load_limits_from_config(self):
         """
@@ -34,17 +39,34 @@ class ConfigLoader:
         返回：
             bool: 加载成功返回True，失败返回False
         """
-        # 原地清空旧规则，确保删除配置后恢复默认，同时保留其他模块的字典引用。
-        self.plugin.group_limits.clear()
-        self.plugin.user_limits.clear()
-        self.plugin.group_modes.clear()
-
-        self.parse_group_limits()
-        self.parse_user_limits()
-        self.parse_group_modes()
-        self.parse_time_period_limits()
-        self.load_skip_patterns()
-        self.validate_daily_reset_time()
+        with self.lock:
+            # Build complete maps before publishing, preserving existing aliases.
+            group_limits, user_limits, group_modes = {}, {}, {}
+            self.parse_group_limits(group_limits)
+            self.parse_user_limits(user_limits)
+            self.parse_group_modes(group_modes)
+            periods = self.parse_time_period_limits()
+            manager = self.plugin.time_period_mgr
+            if not self._loaded:
+                # Startup needs the persisted legacy order before counter migration.
+                self.plugin.time_period_limits[:] = periods
+                manager.before_time_period_change(require_redis=False)
+            else:
+                manager.before_time_period_change(
+                    require_redis=periods != self.plugin.time_period_limits
+                )
+            for target, replacement in (
+                (self.plugin.group_limits, group_limits),
+                (self.plugin.user_limits, user_limits),
+                (self.plugin.group_modes, group_modes),
+            ):
+                target.clear()
+                target.update(replacement)
+            self.plugin.time_period_limits[:] = periods
+            self.load_skip_patterns()
+            self.validate_daily_reset_time()
+            self.load_security_config()
+            self._loaded = True
 
         self.logger.log_info(
             "已加载 {} 个群组限制、{} 个用户限制、{} 个群组模式配置、{} 个时间段限制和{} 个忽略模式",
@@ -55,8 +77,7 @@ class ConfigLoader:
             len(self.plugin.skip_patterns),
         )
 
-        # 加载安全配置
-        self.load_security_config()
+        return True
 
     def parse_limits_config(
         self, config_key: str, limits_dict: dict, limit_type: str
@@ -89,13 +110,17 @@ class ConfigLoader:
         for line in lines:
             self.parse_limit_line(line, limits_dict, limit_type)
 
-    def parse_group_limits(self):
+    def parse_group_limits(self, target=None):
         """解析群组特定限制配置"""
-        self.parse_limits_config("group_limits", self.plugin.group_limits, "群组")
+        self.parse_limits_config(
+            "group_limits", self.plugin.group_limits if target is None else target, "群组"
+        )
 
-    def parse_user_limits(self):
+    def parse_user_limits(self, target=None):
         """解析用户特定限制配置"""
-        self.parse_limits_config("user_limits", self.plugin.user_limits, "用户")
+        self.parse_limits_config(
+            "user_limits", self.plugin.user_limits if target is None else target, "用户"
+        )
 
     def parse_config_lines(self, config_text, parser_func):
         """
@@ -217,12 +242,14 @@ class ConfigLoader:
         else:
             self.logger.log_warning("{}限制配置格式错误: {}", limit_type, line)
 
-    def parse_group_modes(self):
+    def parse_group_modes(self, target=None):
         """解析群组模式配置"""
         group_mode_text = self.config["limits"].get("group_mode_settings", "")
-        self.parse_config_lines(group_mode_text, self.parse_group_mode_line)
+        self.parse_config_lines(
+            group_mode_text, lambda line: self.parse_group_mode_line(line, target)
+        )
 
-    def parse_group_mode_line(self, line):
+    def parse_group_mode_line(self, line, target=None):
         """
         解析单行群组模式配置
 
@@ -237,14 +264,14 @@ class ConfigLoader:
         mode = parts[1].strip()
 
         if group_id and mode in ["shared", "individual"]:
-            self.plugin.group_modes[group_id] = mode
+            (self.plugin.group_modes if target is None else target)[group_id] = mode
         else:
             self.logger.log_warning("群组模式配置格式错误: {}", line)
 
     def parse_time_period_limits(self):
         """解析时间段限制配置"""
         if hasattr(self.plugin, "time_period_mgr"):
-            self.plugin.time_period_mgr.parse_time_period_limits()
+            return self.plugin.time_period_mgr.parse_time_period_limits()
         else:
             # 兼容旧代码：直接在插件中处理
             time_period_config = self.config["limits"].get("time_period_limits", [])
@@ -275,6 +302,7 @@ class ConfigLoader:
                         })
                     except (ValueError, IndexError):
                         self.logger.log_warning("时间段限制配置格式错误: {}", line)
+            return self.plugin.time_period_limits
 
     def load_skip_patterns(self):
         """加载忽略模式配置"""
