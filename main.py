@@ -1816,6 +1816,20 @@ class DailyLimitPlugin(star.Star):
                 status_msg = self.message_builder.build_exempt_user_status(
                     user_id, group_id, time_period_limit, current_time_str
                 )
+                if group_id is not None and self._get_group_mode(group_id) == "shared":
+                    # Display the group's budget, independently of personal exemption
+                    # and user-specific overrides. Active periods use their own counter.
+                    group_limit = (
+                        time_period_limit if time_period_limit is not None
+                        else self.group_limits.get(
+                            str(group_id), self.config["limits"]["default_daily_limit"]
+                        )
+                    )
+                    group_status = self.message_builder.build_shared_group_status(
+                        user_id, group_id, group_limit,
+                        self.message_builder.get_reset_time(),
+                    )
+                    status_msg += "\n\n" + group_status
             else:
                 reset_time = self.message_builder.get_reset_time()
 
@@ -3118,7 +3132,9 @@ class DailyLimitPlugin(star.Star):
 
     @filter.permission_type(PermissionType.ADMIN)
     @limit_command_group.command("reset")
-    async def limit_reset(self, event: AstrMessageEvent, user_id: str = None):
+    async def limit_reset(
+        self, event: AstrMessageEvent, user_id: str = "", group_id: str = ""
+    ):
         """重置使用次数（仅管理员）"""
         if not self.redis:
             event.set_result(
@@ -3127,7 +3143,7 @@ class DailyLimitPlugin(star.Star):
             return
 
         try:
-            if user_id is None:
+            if user_id in (None, ""):
                 # 显示重置帮助信息
                 help_msg = (
                     "🔄 重置使用次数命令用法：\n"
@@ -3144,6 +3160,12 @@ class DailyLimitPlugin(star.Star):
 
             # 将user_id转换为字符串，防止整数类型导致lower()方法失败
             user_id_str = str(user_id)
+
+            if group_id not in (None, "") and user_id_str.lower() != "group":
+                event.set_result(MessageEventResult().message(
+                    "用法: /limit reset all、/limit reset <用户ID> 或 /limit reset group <群组ID>"
+                ))
+                return
 
             if user_id_str.lower() == "all":
                 # 重置所有使用记录
@@ -3169,9 +3191,14 @@ class DailyLimitPlugin(star.Star):
                     )
                 )
 
-            elif user_id_str.lower().startswith("group "):
+            elif user_id_str.lower() == "group":
                 # 重置特定群组
-                group_id = user_id_str[6:].strip()  # 移除"group "前缀
+                if group_id in (None, ""):
+                    event.set_result(MessageEventResult().message(
+                        "用法: /limit reset group <群组ID>"
+                    ))
+                    return
+                group_id = str(group_id)
 
                 # 验证群组ID格式
                 if not group_id.isdigit():
@@ -3226,7 +3253,10 @@ class DailyLimitPlugin(star.Star):
                 today_key = self._get_today_key()
                 pattern = f"{today_key}:*:{user_id_str}"
 
-                keys = self.redis.keys(pattern)
+                # The shared-group namespace also ends in a numeric ID; a user
+                # reset must not delete an unrelated group with the same ID.
+                group_key = self._get_group_key(user_id_str)
+                keys = [key for key in self.redis.keys(pattern) if key != group_key]
 
                 if not keys:
                     event.set_result(

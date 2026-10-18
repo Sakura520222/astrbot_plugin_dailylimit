@@ -150,6 +150,7 @@ def plugin_class(root):
     namespace = {"FakeStar": FakeStar, "datetime": CLOCK, "time": time,
                  "json": json, "Logger": FakeLogger, "RedisClient": FakeRedisClient,
                  "WebServer": None, "MessageType": MessageType,
+                 "AstrMessageEvent": Event,
                  "MessageChain": Message, "MessageEventResult": Message}
     for filename, classname in [("config_manager", "ConfigManager"),
                                 ("config_loader", "ConfigLoader"), ("limiter", "Limiter"),
