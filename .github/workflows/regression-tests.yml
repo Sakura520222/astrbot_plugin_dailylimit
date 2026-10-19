@@ -1,0 +1,58 @@
+name: Quota regressions
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: Unit tests (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ['3.10', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m unittest discover -s tests -v
+
+  astrbot-redis:
+    name: AstrBot ${{ matrix.astrbot.version }} and Redis
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        astrbot:
+          - version: '4.10.0'
+            ref: a44fdaaec0bd0f9cff5f4ca04f8e613ff074319d
+          - version: '4.28.2'
+            ref: 3c7adafa1397e182d60b1016bf88759265113c8a
+          - version: '4.29.1'
+            ref: e5e21b71aec5642f110eb115eb8e9a0d8028b7e5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: AstrBotDevs/AstrBot
+          ref: ${{ matrix.astrbot.ref }}
+          path: .test-astrbot
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install 'redis>=4.5.0' redislite==6.2.912183
+      - name: Locate isolated Redis server
+        run: |
+          python - <<'PY' >> "$GITHUB_ENV"
+          import redislite
+          print(f"DAILYLIMIT_TEST_REDIS_SERVER={redislite.__redis_executable__}")
+          PY
+      - name: Run all regressions with upstream filters and Redis
+        env:
+          ASTRBOT_SOURCE: ${{ github.workspace }}/.test-astrbot
+        run: python -m unittest discover -s tests -v

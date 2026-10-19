@@ -166,7 +166,12 @@ class StatsAnalyzer:
         total_requests = []
         active_users = []
         active_groups = []
-        dates = list(trend_data.keys())
+        # Period keys are YYYY-MM-DD, YYYY-Wn or YYYY-MM. Sort numerically so
+        # the summary's last point is newest, including unpadded week numbers.
+        dates = sorted(
+            trend_data,
+            key=lambda value: tuple(int(part) for part in value.replace("-W", "-").split("-")),
+        )
 
         for date in dates:
             data = trend_data[date]
@@ -355,18 +360,19 @@ class StatsAnalyzer:
             return {}
 
         try:
-            today_key = self.usage_tracker._get_today_key()
-            pattern = f"{today_key}:*"
+            # Use the same reset bucket and quota-record definition as WebUI.
+            # UsageTracker has no _get_today_key method after modularization.
+            today_key = self.plugin.redis_keys.get_today_key()
+            pattern = f"{today_key}:*:*"
             keys = redis_client.redis.keys(pattern)
 
             total_calls = 0
-            active_users = 0
+            active_users = len(keys)
 
             for key in keys:
                 usage = redis_client.redis.get(key)
                 if usage:
                     total_calls += int(usage)
-                    active_users += 1
 
             return {
                 "total_calls": total_calls,
