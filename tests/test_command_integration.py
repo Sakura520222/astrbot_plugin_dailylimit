@@ -152,6 +152,21 @@ class AstrBotCommandTests(unittest.TestCase):
         self.assertEqual(self.dispatch("/limit_status", "limit_status", user="99", admin=False)[1].result,
                          "您没有权限查询使用限制")
 
+    def test_stats_command_reports_usage_and_requires_admin_permission(self):
+        self.assertTrue(request(self.plugin, "20", "100")[0])
+        accepted, event = self.dispatch("/limit stats", "limit_stats")
+        self.assertTrue(accepted)
+        self.assertIn("活跃用户数: 1\n", event.result)
+        self.assertIn("总调用次数: 1\n", event.result)
+        self.assertIn("用户特定限制数: 2\n", event.result)
+        self.assertIn("群组特定限制数: 2\n", event.result)
+        self.assertIn("豁免用户数: 1", event.result)
+        for user in ["20", "99"]:
+            with self.subTest(user=user):
+                accepted, event = self.dispatch("/limit stats", "limit_stats", user=user, admin=False)
+                self.assertFalse(accepted)
+                self.assertIsNone(event.result)
+
 
 @unittest.skipUnless(ASTRBOT_SOURCE and REDIS_SERVER,
                      "set ASTRBOT_SOURCE and DAILYLIMIT_TEST_REDIS_SERVER for real Redis")
@@ -217,6 +232,9 @@ class RedisCommandTests(AstrBotCommandTests):
         self.addCleanup(binary.close)
         before = {key: binary.dump(key) for key in self.client.keys("*")}
         deadlines = {key: self.client.pttl(key) for key in before}
+        stats_result = self.dispatch("/limit stats", "limit_stats")[1].result
+        self.assertIn("活跃用户数: 2\n", stats_result)
+        self.assertIn("总调用次数: 9\n", stats_result)
         result = self.dispatch("/limit_status", "limit_status", user="99", admin=False)[1].result
         self.assertIn("剩余次数：0 次", result)
         self.assertEqual(series(self.plugin, 3, "99", "100"), [True] * 3)

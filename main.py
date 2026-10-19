@@ -2539,6 +2539,11 @@ class DailyLimitPlugin(star.Star):
         try:
             # 使用 stats_analyzer 获取今日统计摘要
             stats_data = self.stats_analyzer.get_today_stats_summary()
+            if not stats_data:
+                event.set_result(MessageEventResult().message(
+                    "获取统计信息失败，请检查Redis连接和日志"
+                ))
+                return
 
             stats_msg = (
                 f"📊 今日统计信息：\n"

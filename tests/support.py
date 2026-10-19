@@ -2,7 +2,7 @@
 
 Real source: full DailyLimitPlugin constructor and methods (AST, decorator and
 Star base removed), ConfigManager, ConfigLoader, Limiter, TimePeriodManager,
-RedisKeys, UsageTracker, MessageBuilder. AstrBot registration/event/message
+RedisKeys, UsageTracker, MessageBuilder, StatsAnalyzer. AstrBot registration/event/message
 objects, config persistence, Redis server, logging, security, version check and
 unrelated managers are substitutes. Not a real AstrBot integration test.
 """
@@ -155,9 +155,10 @@ def plugin_class(root):
     for filename, classname in [("config_manager", "ConfigManager"),
                                 ("config_loader", "ConfigLoader"), ("limiter", "Limiter"),
                                 ("usage_tracker", "UsageTracker"), ("message_builder", "MessageBuilder"),
-                                ("time_period_manager", "TimePeriodManager"), ("redis_keys", "RedisKeys")]:
+                                ("time_period_manager", "TimePeriodManager"), ("redis_keys", "RedisKeys"),
+                                ("stats_analyzer", "StatsAnalyzer")]:
         namespace[classname] = source_class(root, filename, classname)
-    for classname in ["Security", "VersionChecker", "HelpManager", "StatsAnalyzer", "WebManager",
+    for classname in ["Security", "VersionChecker", "HelpManager", "WebManager",
                       "SecurityHandler", "MessagesHandler"]:
         namespace[classname] = OtherManager
     exec(compile(ast.fix_missing_locations(module), str(root / "main.py"), "exec"), namespace)  # noqa: S102 -- trusted repository source
