@@ -267,15 +267,9 @@ class UsageTracker:
         if not redis_client or not redis_client.redis:
             return {}
 
-        try:
-            data = redis_client.redis.hgetall(trend_key)
-            if data:
-                # 将字符串值转换为整数
-                return {k: int(v) for k, v in data.items()}
-            return {}
-        except Exception as e:
-            self.logger.log_error("获取趋势统计失败: {}", str(e))
-            return {}
+        # Reuse the identity-aware parser rather than returning raw hash fields
+        # as metrics (or trying to turn floating-point metadata into integers).
+        return self.plugin._get_trend_stats_by_key(trend_key) or {}
 
     # 以下方法需要从 main.py 中调用，提供占位符实现
     def _get_usage_record_key(self, user_id, group_id=None, date_str=None):

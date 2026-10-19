@@ -166,7 +166,12 @@ class StatsAnalyzer:
         total_requests = []
         active_users = []
         active_groups = []
-        dates = list(trend_data.keys())
+        # Period keys are YYYY-MM-DD, YYYY-Wn or YYYY-MM. Sort numerically so
+        # the summary's last point is newest, including unpadded week numbers.
+        dates = sorted(
+            trend_data,
+            key=lambda value: tuple(int(part) for part in value.replace("-W", "-").split("-")),
+        )
 
         for date in dates:
             data = trend_data[date]

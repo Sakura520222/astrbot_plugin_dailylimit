@@ -163,7 +163,6 @@ class DailyLimitPlugin(star.Star):
         self.abuse_records = self.security.abuse_records
         self.blocked_users = self.security.blocked_users
         self.abuse_stats = self.security.abuse_stats
-        self.anti_abuse_enabled = self.security.anti_abuse_enabled
 
         # 初始化Redis连接
         self._init_redis()
@@ -885,6 +884,14 @@ class DailyLimitPlugin(star.Star):
     def _get_seconds_until_tomorrow(self):
         """获取到下次重置时间的秒数（代理方法）"""
         return self.redis_keys.get_seconds_until_tomorrow()
+
+    def _get_reset_time(self):
+        """返回下一次每日重置的日期和时间。"""
+        now = datetime.datetime.now()
+        reset_at = datetime.datetime.combine(now.date(), self.message_builder.get_reset_time())
+        if now >= reset_at:
+            reset_at += datetime.timedelta(days=1)
+        return reset_at
 
     def _record_trend_data(self, user_id, group_id=None, usage_type="llm_request"):
         """记录趋势分析数据
@@ -2137,7 +2144,8 @@ class DailyLimitPlugin(star.Star):
                 # 验证时间格式
                 try:
                     # 使用现有的时间格式验证方法
-                    if not self._validate_time_format(new_time):
+                    parsed_time = self._parse_time_string(new_time)
+                    if parsed_time is None or parsed_time.strftime("%H:%M") != new_time:
                         event.set_result(
                             MessageEventResult().message(
                                 f"❌ 时间格式错误：{new_time}\n请使用 HH:MM 格式（24小时制）\n示例：06:00、23:59"

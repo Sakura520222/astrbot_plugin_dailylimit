@@ -167,6 +167,70 @@ class AstrBotCommandTests(unittest.TestCase):
                 self.assertFalse(accepted)
                 self.assertIsNone(event.result)
 
+    def test_resettime_get_set_reset_and_admin_permissions(self):
+        for text, expected in [("/limit resettime get", "下次重置时间：2026-10-10 00:00:00"),
+                               ("/limit resettime set 06:00", "已设置每日重置时间为 06:00"),
+                               ("/limit resettime get", "下次重置时间：2026-10-10 06:00:00"),
+                               ("/limit resettime reset", "默认值 00:00")]:
+            with self.subTest(text=text):
+                accepted, event = self.dispatch(text, "limit_resettime")
+                self.assertTrue(accepted)
+                self.assertIn(expected, event.result)
+        saved = len(self.plugin.config.saved)
+        for action in ["get", "set 07:00", "reset"]:
+            accepted, event = self.dispatch("/limit resettime " + action, "limit_resettime",
+                                            user="99", admin=False)
+            self.assertFalse(accepted)
+            self.assertIsNone(event.result)
+        self.assertEqual(len(self.plugin.config.saved), saved)
+
+    def test_security_commands_and_llm_detector_use_same_live_configuration(self):
+        self.plugin.config["security"].update({"anti_abuse_enabled": True,
+                                                "rapid_request_threshold": 2,
+                                                "rapid_request_window": 60,
+                                                "consecutive_request_threshold": 99,
+                                                "auto_block_duration": 37,
+                                                "admin_notification_enabled": False})
+        self.plugin._load_limits_from_config()
+        for action in ["status", "config"]:
+            result = self.dispatch("/limit security " + action, "limit_security")[1].result
+            self.assertIn("防刷机制：✅ 已启用", result)
+            self.assertIn("2次/60秒", result)
+            self.assertIn("37秒", result)
+        for action in ["status", "config", "enable", "disable"]:
+            accepted, event = self.dispatch("/limit security " + action, "limit_security",
+                                            user="99", admin=False)
+            self.assertFalse(accepted)
+            self.assertIsNone(event.result)
+        self.assertIn("已禁用", self.dispatch("/limit security disable", "limit_security")[1].result)
+        self.assertFalse(self.plugin.security.anti_abuse_enabled)
+        self.assertIn("已启用", self.dispatch("/limit security enable", "limit_security")[1].result)
+        self.assertTrue(self.plugin.security.anti_abuse_enabled)
+        self.assertTrue(request(self.plugin, "20", "100")[0])
+        self.assertFalse(request(self.plugin, "20", "100")[0])
+        self.assertEqual(self.plugin.blocked_users["20"]["duration"], 37)
+
+    def test_trends_parse_real_identities_and_float_metadata_without_mutation(self):
+        self.assertTrue(request(self.plugin, "20", "100")[0])
+        self.assertTrue(request(self.plugin, "21", "100")[0])
+        self.assertTrue(request(self.plugin, "20")[0])
+        today = "astrbot:trend:daily:2026-10-09"
+        self.plugin.redis.hset(today, "updated_at", "1792400000.25")
+        older = "astrbot:trend:daily:2026-10-08"
+        self.plugin.redis.hset(older, "total_requests", 99)
+        self.plugin.redis.hset(older, "user:30", 99)
+        before = {key: self.plugin.redis.hgetall(key) for key in self.plugin.redis.keys("astrbot:trend:*")}
+        accepted, event = self.dispatch("/limit trends", "limit_trends")
+        self.assertTrue(accepted)
+        self.assertIn("总请求数趋势: 3 次", event.result)
+        self.assertIn("活跃用户数: 2 人", event.result)
+        self.assertIn("活跃群组数: 1 个", event.result)
+        after = {key: self.plugin.redis.hgetall(key) for key in self.plugin.redis.keys("astrbot:trend:*")}
+        self.assertEqual(after, before)
+        accepted, event = self.dispatch("/limit trends", "limit_trends", user="99", admin=False)
+        self.assertFalse(accepted)
+        self.assertIsNone(event.result)
+
 
 @unittest.skipUnless(ASTRBOT_SOURCE and REDIS_SERVER,
                      "set ASTRBOT_SOURCE and DAILYLIMIT_TEST_REDIS_SERVER for real Redis")

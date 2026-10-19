@@ -2,7 +2,8 @@
 
 Real source: full DailyLimitPlugin constructor and methods (AST, decorator and
 Star base removed), ConfigManager, ConfigLoader, Limiter, TimePeriodManager,
-RedisKeys, UsageTracker, MessageBuilder, StatsAnalyzer. AstrBot registration/event/message
+RedisKeys, UsageTracker, MessageBuilder, StatsAnalyzer, Security, SecurityHandler.
+AstrBot registration/event/message
 objects, config persistence, Redis server, logging, security, version check and
 unrelated managers are substitutes. Not a real AstrBot integration test.
 """
@@ -129,7 +130,15 @@ def source_class(root, name, class_name):
     path = root / "core" / f"{name}.py"
     spec = importlib.util.spec_from_file_location(f"review_{root.name}_{name}", path)
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    if name == "security_handler":
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        tree.body = [node for node in tree.body if not (
+            isinstance(node, ast.ImportFrom) and node.module == "astrbot.api.event")]
+        module.AstrMessageEvent = Event
+        module.MessageEventResult = Message
+        exec(compile(tree, str(path), "exec"), vars(module))  # noqa: S102 -- trusted source, event imports substituted
+    else:
+        spec.loader.exec_module(module)
     if hasattr(module, "datetime"):
         module.datetime = CLOCK
     return getattr(module, class_name)
@@ -156,10 +165,10 @@ def plugin_class(root):
                                 ("config_loader", "ConfigLoader"), ("limiter", "Limiter"),
                                 ("usage_tracker", "UsageTracker"), ("message_builder", "MessageBuilder"),
                                 ("time_period_manager", "TimePeriodManager"), ("redis_keys", "RedisKeys"),
-                                ("stats_analyzer", "StatsAnalyzer")]:
+                                ("stats_analyzer", "StatsAnalyzer"), ("security", "Security"),
+                                ("security_handler", "SecurityHandler")]:
         namespace[classname] = source_class(root, filename, classname)
-    for classname in ["Security", "VersionChecker", "HelpManager", "WebManager",
-                      "SecurityHandler", "MessagesHandler"]:
+    for classname in ["VersionChecker", "HelpManager", "WebManager", "MessagesHandler"]:
         namespace[classname] = OtherManager
     exec(compile(ast.fix_missing_locations(module), str(root / "main.py"), "exec"), namespace)  # noqa: S102 -- trusted repository source
     return namespace["DailyLimitPlugin"]
@@ -175,11 +184,13 @@ DEFAULT_CONFIG = {
 }
 
 
-def make_plugin(updates=None, at=None):
+def make_plugin(updates=None, at=None, security_updates=None):
     FixedDateTime.current = at or FixedDateTime(2026, 10, 9, 12, 0, 0)
     config = copy.deepcopy(DEFAULT_CONFIG)
     if updates:
         config["limits"].update(updates)
+    if security_updates:
+        config["security"].update(security_updates)
     return plugin_class(ROOT)(None, FakeConfig(config))
 
 

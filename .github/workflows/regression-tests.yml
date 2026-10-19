@@ -30,6 +30,8 @@ jobs:
         astrbot:
           - version: '4.10.0'
             ref: a44fdaaec0bd0f9cff5f4ca04f8e613ff074319d
+          - version: '4.28.2'
+            ref: 3c7adafa1397e182d60b1016bf88759265113c8a
           - version: '4.29.1'
             ref: e5e21b71aec5642f110eb115eb8e9a0d8028b7e5
     steps:
