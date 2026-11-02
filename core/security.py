@@ -23,15 +23,6 @@ class Security:
         """
         self.plugin = plugin
         self.logger = plugin.logger
-        self.config_mgr = plugin.config_mgr
-
-        # 安全配置（从 config_mgr 获取）
-        self.anti_abuse_enabled = False
-        self.rapid_request_threshold = 10
-        self.rapid_request_window = 10
-        self.consecutive_request_threshold = 5
-        self.consecutive_request_window = 30
-        self.auto_block_duration = 3600  # 默认1小时
 
         # 异常行为记录
         self.abuse_records = {}  # {"user_id": [timestamp1, timestamp2, ...]}
@@ -43,20 +34,34 @@ class Security:
         self.notified_admins = {}  # {"admin_id": timestamp}
 
     def load_security_config(self):
-        """从配置管理器加载安全配置"""
-        if self.config_mgr:
-            self.anti_abuse_enabled = self.config_mgr.anti_abuse_enabled
-            self.rapid_request_threshold = self.config_mgr.rapid_request_threshold
-            self.rapid_request_window = self.config_mgr.rapid_request_window
-            self.consecutive_request_threshold = self.config_mgr.consecutive_request_threshold
-            self.consecutive_request_window = self.config_mgr.consecutive_request_window
-        else:
-            # 默认值
-            self.anti_abuse_enabled = False
-            self.rapid_request_threshold = 10
-            self.rapid_request_window = 10
-            self.consecutive_request_threshold = 5
-            self.consecutive_request_window = 30
+        """通过统一配置入口重载；检测和命令直接使用相同运行配置。"""
+        self.plugin._load_security_config()
+
+    # ConfigLoader publishes these values on the plugin. Read them directly so
+    # startup, reload and security commands cannot leave stale detector copies.
+    @property
+    def anti_abuse_enabled(self):
+        return self.plugin.anti_abuse_enabled
+
+    @property
+    def rapid_request_threshold(self):
+        return self.plugin.rapid_request_threshold
+
+    @property
+    def rapid_request_window(self):
+        return self.plugin.rapid_request_window
+
+    @property
+    def consecutive_request_threshold(self):
+        return self.plugin.consecutive_request_threshold
+
+    @property
+    def consecutive_request_window(self):
+        return self.plugin.consecutive_request_window
+
+    @property
+    def auto_block_duration(self):
+        return self.plugin.auto_block_duration
 
     def detect_abuse_behavior(self, user_id, timestamp=None):
         """检测异常使用行为

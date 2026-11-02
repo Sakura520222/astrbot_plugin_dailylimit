@@ -179,6 +179,12 @@ class MemoryRedis:
             self._check(key, "hash")
             return self.hashes.get(key, {}).get(field)
 
+    def hgetall(self, key):
+        with self._lock:
+            key = self._name(key)
+            self._check(key, "hash")
+            return dict(self.hashes.get(key, {}))
+
     def hset(self, key, field=None, value=None, mapping=None):
         with self._lock:
             key = self._name(key)
