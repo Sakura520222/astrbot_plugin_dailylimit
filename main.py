@@ -6,8 +6,6 @@ import os
 import sys
 import time
 
-import aiohttp
-
 import astrbot.api.star as star  # type: ignore
 from astrbot.api import AstrBotConfig  # type: ignore
 from astrbot.api.event import (  # type: ignore
@@ -91,13 +89,6 @@ except Exception as e:
     _import_error = str(e)
 
 
-@star.register(
-    name="daily_limit",
-    desc="限制用户每日调用大模型的次数",
-    author="left666 & Sakura520222",
-    version="v2.8.11",
-    repo="https://github.com/left666/astrbot_plugin_daily_limit",
-)
 class DailyLimitPlugin(star.Star):
     """限制群组成员每日调用大模型的次数"""
 
@@ -1867,7 +1858,7 @@ class DailyLimitPlugin(star.Star):
     async def limit_help_all(self, event: AstrMessageEvent):
         """显示本插件所有指令及其帮助信息"""
         help_msg = (
-            "🚀 日调用限制插件 v2.8.11 - 完整指令帮助\n"
+            f"🚀 日调用限制插件 {self.plugin_version} - 完整指令帮助\n"
             "═════════════════════════\n\n"
             "👤 用户指令（所有人可用）：\n"
             "├── /limit_status - 查看您今日的使用状态和剩余次数\n"
@@ -1887,7 +1878,8 @@ class DailyLimitPlugin(star.Star):
             "├── /limit analytics [日期] - 多维度统计分析\n"
             "├── /limit top [数量] - 查看使用次数排行榜\n"
             "├── /limit status - 检查插件状态和健康状态\n"
-            "├── /limit reset <用户ID|all> - 重置用户使用次数\n"
+            "├── /limit reset <用户ID|all> - 重置用户或全部使用次数\n"
+            "├── /limit reset group <群组ID> - 重置群组共享与成员日计数\n"
             "└── /limit skip_patterns - 管理忽略处理的模式配置\n\n"
             "⏰ 时间段限制命令：\n"
             "├── /limit timeperiod list - 列出所有时间段限制配置\n"
@@ -1907,14 +1899,14 @@ class DailyLimitPlugin(star.Star):
             "└── /limit skip_patterns reset - 重置为默认模式\n\n"
             "💡 核心功能特性：\n"
             "✅ 智能限制系统：多级权限管理，支持用户、群组、豁免用户三级体系\n"
-            "✅ 时间段限制：支持按时间段设置不同的调用限制（优先级最高）\n"
+            "✅ 时间段限制：支持按时间段设置不同的调用限制（豁免用户除外）\n"
             "✅ 群组协作模式：支持共享模式（群组共享次数）和独立模式（成员独立次数）\n"
             "✅ 数据监控分析：实时监控、使用统计、排行榜和状态监控\n"
             "✅ 使用记录：详细记录每次调用，支持历史查询和统计分析\n"
             "✅ 自定义忽略模式：可配置需要忽略处理的消息前缀\n\n"
             "🎯 优先级规则（从高到低）：\n"
-            "1️⃣ ⏰ 时间段限制 - 优先级最高（特定时间段内的限制）\n"
-            "2️⃣ 🏆 豁免用户 - 完全不受限制（白名单用户）\n"
+            "1️⃣ 🏆 豁免用户 - 完全不受限制且不计数（白名单用户）\n"
+            "2️⃣ ⏰ 时间段限制 - 对非豁免用户优先生效\n"
             "3️⃣ 👤 用户特定限制 - 针对单个用户的个性化设置\n"
             "4️⃣ 👥 群组特定限制 - 针对整个群组的统一设置\n"
             "5️⃣ ⚙️ 默认限制 - 全局默认设置（兜底规则）\n\n"
@@ -1929,9 +1921,9 @@ class DailyLimitPlugin(star.Star):
             "📝 使用提示：\n"
             "• 普通用户可使用 /limit_status 查看自己的使用状态\n"
             "• 管理员可使用 /limit help 查看详细管理命令\n"
-            "• 时间段限制优先级最高，会覆盖其他限制规则\n"
+            "• 时间段限制优先于其他限额规则，豁免用户不受影响\n"
             "• 默认忽略模式：#、*（可自定义添加）\n\n"
-            "📝 版本信息：v2.8.11 | 作者：left666 | 改进：Sakura520222\n"
+            f"📝 版本信息：{self.plugin_version} | 原作者：left666 | 维护：车厘子小樱 (Sakura520222)\n"
             "═════════════════════════"
         )
 
@@ -3590,7 +3582,7 @@ class DailyLimitPlugin(star.Star):
                             f"📦 当前版本：{current_version}\n"
                             f"🆕 最新版本：{self.version_checker.last_checked_version}\n"
                             f"📝 更新内容：{update_content}\n"
-                            f"🔗 下载地址：https://github.com/left666/astrbot_plugin_daily_limit"
+                            f"🔗 下载地址：https://github.com/Sakura520222/astrbot_plugin_dailyLimit"
                             f"\nCiallo～(∠・ω< )⌒★"
                         )
                     )
@@ -3625,8 +3617,8 @@ class DailyLimitPlugin(star.Star):
             version_msg = "📦 日调用限制插件版本信息\n"
             version_msg += "══════════════\n\n"
             version_msg += f"• 当前版本：{current_version}\n"
-            version_msg += "• 作者：left666\n"
-            version_msg += "• 改进：Sakura520222\n\n"
+            version_msg += "• 原作者：left666\n"
+            version_msg += "• 维护：车厘子小樱 (Sakura520222)\n\n"
 
             # 添加版本检查状态
             if not self.config["version_check"].get("enabled", True):

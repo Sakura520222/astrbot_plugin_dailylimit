@@ -1,9 +1,10 @@
 name: daily_limit
 display_name: 每日调用限制(重构版)
-desc: 限制用户每日调用大模型的次数
+desc: 管理用户与群组的大模型调用额度，支持共享与独立计数、时段限制、防刷及 Web 管理。
 version: v2.8.11
 author: 车厘子小樱
 repo: https://github.com/Sakura520222/astrbot_plugin_dailyLimit
+astrbot_version: ">=4.10.0,<5"
 
 tags:
   - 安全
