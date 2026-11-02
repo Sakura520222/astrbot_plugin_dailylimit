@@ -95,7 +95,7 @@ except Exception as e:
     name="daily_limit",
     desc="限制用户每日调用大模型的次数",
     author="left666 & Sakura520222",
-    version="v2.8.10",
+    version="v2.8.11",
     repo="https://github.com/left666/astrbot_plugin_daily_limit",
 )
 class DailyLimitPlugin(star.Star):
@@ -105,7 +105,7 @@ class DailyLimitPlugin(star.Star):
         super().__init__(context)
         self.context = context
         self.config = config
-        self.plugin_version = "v2.8.10"  # Installed version, independent of saved user configuration.
+        self.plugin_version = "v2.8.11"  # Installed version, independent of saved user configuration.
         self.group_limits = {}  # 群组特定限制 {"group_id": limit_count}
         self.user_limits = {}  # 用户特定限制 {"user_id": limit_count}
         self.group_modes = {}  # 群组模式配置 {"group_id": "shared"或"individual"}
@@ -1867,7 +1867,7 @@ class DailyLimitPlugin(star.Star):
     async def limit_help_all(self, event: AstrMessageEvent):
         """显示本插件所有指令及其帮助信息"""
         help_msg = (
-            "🚀 日调用限制插件 v2.8.10 - 完整指令帮助\n"
+            "🚀 日调用限制插件 v2.8.11 - 完整指令帮助\n"
             "═════════════════════════\n\n"
             "👤 用户指令（所有人可用）：\n"
             "├── /limit_status - 查看您今日的使用状态和剩余次数\n"
@@ -1931,7 +1931,7 @@ class DailyLimitPlugin(star.Star):
             "• 管理员可使用 /limit help 查看详细管理命令\n"
             "• 时间段限制优先级最高，会覆盖其他限制规则\n"
             "• 默认忽略模式：#、*（可自定义添加）\n\n"
-            "📝 版本信息：v2.8.10 | 作者：left666 | 改进：Sakura520222\n"
+            "📝 版本信息：v2.8.11 | 作者：left666 | 改进：Sakura520222\n"
             "═════════════════════════"
         )
 
@@ -3670,7 +3670,7 @@ class DailyLimitPlugin(star.Star):
 ░░░░░░░░░░   ░░░░░   ░░░░░ ░░░░░ ░░░░░░░░░░░    ░░░░░       ░░░░░░░░░░░ ░░░░░ ░░░░░     ░░░░░ ░░░░░    ░░░░░    
                                                                                                                 
                                                                                                                                                                                                       
-                                       每日调用限制插件 v2.8.10
+                                       每日调用限制插件 v2.8.11
                                   作者: left666 & Sakura520222                  
     """
 
