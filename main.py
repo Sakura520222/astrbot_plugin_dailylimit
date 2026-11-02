@@ -96,7 +96,18 @@ class DailyLimitPlugin(star.Star):
         super().__init__(context)
         self.context = context
         self.config = config
-        self.plugin_version = "v2.8.11"  # Installed version, independent of saved user configuration.
+        # AstrBot loads metadata.yaml before constructing the plugin.
+        metadata = next(
+            (
+                item
+                for item in context.get_all_stars()
+                if item.module_path == self.__class__.__module__
+            ),
+            None,
+        )
+        if metadata is None or not metadata.version:
+            raise ValueError("Installed plugin metadata must include a version")
+        self.plugin_version = f"v{metadata.version.removeprefix('v')}"
         self.group_limits = {}  # 群组特定限制 {"group_id": limit_count}
         self.user_limits = {}  # 用户特定限制 {"user_id": limit_count}
         self.group_modes = {}  # 群组模式配置 {"group_id": "shared"或"individual"}
