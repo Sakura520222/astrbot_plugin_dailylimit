@@ -50,6 +50,28 @@ class PluginContractTests(unittest.TestCase):
         )
         self.assertEqual(plugin.decorator_list, [])
 
+    def test_runtime_version_uses_registered_metadata(self):
+        plugin = make_plugin()
+        metadata = types.SimpleNamespace(
+            module_path=type(plugin).__module__, version="v9.8.7"
+        )
+        unrelated = types.SimpleNamespace(
+            module_path="another_plugin", version="v0.0.1"
+        )
+        context = types.SimpleNamespace(get_all_stars=lambda: [unrelated, metadata])
+        plugin.config["version_check"] = {"current_version": "v0.0.1"}
+        for version in ("v9.8.7", "9.8.7"):
+            with self.subTest(version=version):
+                metadata.version = version
+                loaded = type(plugin)(context, plugin.config)
+                self.assertEqual(loaded.plugin_version, "v9.8.7")
+
+    def test_runtime_version_rejects_missing_metadata(self):
+        plugin = make_plugin()
+        context = types.SimpleNamespace(get_all_stars=lambda: [])
+        with self.assertRaisesRegex(ValueError, "metadata must include a version"):
+            type(plugin)(context, plugin.config)
+
     def test_help_uses_installed_version_and_documents_group_reset(self):
         plugin = make_plugin()
         plugin.plugin_version = "v9.8.7"

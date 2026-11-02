@@ -191,7 +191,15 @@ def make_plugin(updates=None, at=None, security_updates=None):
         config["limits"].update(updates)
     if security_updates:
         config["security"].update(security_updates)
-    return plugin_class(ROOT)(None, FakeConfig(config))
+    plugin_type = plugin_class(ROOT)
+    version = next(
+        line.split(":", 1)[1].strip()
+        for line in (ROOT / "metadata.yaml").read_text(encoding="utf-8").splitlines()
+        if line.startswith("version:")
+    )
+    metadata = types.SimpleNamespace(module_path=plugin_type.__module__, version=version)
+    context = types.SimpleNamespace(get_all_stars=lambda: [metadata])
+    return plugin_type(context, FakeConfig(config))
 
 
 def request(plugin, user="20", group=None, text="hello", prompt="hello"):

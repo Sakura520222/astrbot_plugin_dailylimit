@@ -85,30 +85,25 @@ jobs:
       
       - name: 读取当前版本
         id: read_version
+        shell: bash
         run: |
-          # 优先从 main.py 读取版本号
-          if [ -f main.py ]; then
-            CURRENT_VERSION=$(
-              sed -n 's/.*version="v\([0-9.]*\)".*/\1/p' main.py | head -n 1
-            )
+          # Use metadata.yaml as the single source of release versions.
+          if [ ! -f metadata.yaml ]; then
+            echo "metadata.yaml is required to determine the release version." >&2
+            exit 1
+          fi
 
-            # 如果未能解析出版本号则直接失败，避免创建错误 tag（如 v）
-            if [ -z "$CURRENT_VERSION" ]; then
-              echo "无法从 main.py 解析版本号，请检查 version 定义格式是否正确。" >&2
-              exit 1
-            fi
-          # 备选：从 metadata.yaml 读取
-          elif [ -f metadata.yaml ]; then
-            CURRENT_VERSION=$(
-              grep "^version:" metadata.yaml | sed 's/version: v\?//' | tr -d '[:space:]'
-            )
-
-            if [ -z "$CURRENT_VERSION" ]; then
-              echo "无法从 metadata.yaml 解析版本号。" >&2
-              exit 1
-            fi
-          else
-            echo "❌ 错误: main.py 和 metadata.yaml 文件都不存在"
+          CURRENT_VERSION=$(
+            sed -n 's/^version:[[:space:]]*//p' metadata.yaml |
+              sed 's/[[:space:]]#.*$//;s/[[:space:]]*$//'
+          )
+          # Accept plain or quoted versions, with or without the v prefix.
+          if [[ "$CURRENT_VERSION" == \"*\" || "$CURRENT_VERSION" == \'*\' ]]; then
+            CURRENT_VERSION="${CURRENT_VERSION:1:-1}"
+          fi
+          CURRENT_VERSION="${CURRENT_VERSION#v}"
+          if [[ ! "$CURRENT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "metadata.yaml must declare a version in vX.Y.Z or X.Y.Z format." >&2
             exit 1
           fi
 
